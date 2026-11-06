@@ -584,12 +584,14 @@ async function newSongs() {
 
 export async function home() {
   const vip = await claimVip(false).catch(() => null);
-  const [daily, lists, fresh] = await Promise.all([
+  const [daily, lists, fresh, played] = await Promise.all([
     dailyTracks().catch(() => []),
     recommendedPlaylists().catch(() => []),
     newSongs().catch(() => []),
+    signedIn() ? recent().catch(() => []) : [],
   ]);
   const sections = [];
+  if (played.length) sections.push({ title: t("Recently played"), tracks: played.slice(0, 10), morePage: "recent" });
   if (daily.length) sections.push({ title: t("Daily picks"), tracks: daily.slice(0, 10), morePage: "daily" });
   if (lists.length) sections.push({ title: t("Recommended playlists"), playlists: lists });
   if (fresh.length) sections.push({ title: t("New songs"), tracks: fresh.slice(0, 10), morePage: "new" });
@@ -607,6 +609,7 @@ export async function browse({ page }) {
   if (page === "daily") return { title: t("Daily picks"), sections: [{ tracks: await dailyTracks(), empty: t("Nothing today") }] };
   if (page === "new") return { title: t("New songs"), sections: [{ tracks: await newSongs() }] };
   if (page === "fm") return { title: t("Private FM"), sections: [{ stations: await stations() }] };
+  if (page === "recent") return { title: t("Recently played"), sections: [{ tracks: await recent(), empty: t("Nothing yet") }] };
   if (page === "cloud") return { title: t("Music cloud"), sections: [{ tracks: await cloudDrive(), empty: t("Nothing in your music cloud") }] };
   if (page === "charts") {
     const rs = await ranks();
@@ -870,10 +873,26 @@ export async function savePlaylist({ id, on }) {
   await myLists().catch(() => {});
 }
 
+// Kugou hands the history out a page at a time, not in order across pages,
+// so this reads a few pages and sorts them by when each song was played.
 export async function recent() {
   const a = needSignIn();
-  const d = await kg("/playhistory/v1/get_songs", { body: { token: a.token, userid: Number(a.userid), source_classify: "app", to_subdivide_sr: 1 } });
-  return tracksOf(list(d.songs, d.list, d.info).map((s) => s.info || s));
+  const seen = new Map();
+  let bp;
+  for (let i = 0; i < 5; i++) {
+    const body = { token: a.token, userid: Number(a.userid), source_classify: "app", to_subdivide_sr: 1 };
+    if (bp) body.bp = bp;
+    const d = await kg("/playhistory/v1/get_songs", { body });
+    for (const s of list(d.songs, d.list, d.info)) {
+      const k = String(s.mxid || s.info?.mixsongid || s.info?.hash || "");
+      const at = Number(s.ot || 0);
+      if (k && (!seen.has(k) || seen.get(k).at < at)) seen.set(k, { at, s });
+    }
+    if (!Number(d.has_more) || !d.bp || d.bp === bp) break;
+    bp = d.bp;
+  }
+  const rows = [...seen.values()].sort((x, y) => y.at - x.at);
+  return tracksOf(rows.map((r) => r.s.info || r.s));
 }
 
 // ---------- cloud playlists: Kugou's encrypted cloudlist protocol ----------

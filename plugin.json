@@ -1,7 +1,7 @@
 {
   "id": "kugou-lite",
   "name": "Kugou Concept",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "minAppVersion": "0.1.8",
   "main": "index.js",
   "playback": "stream",
@@ -44,6 +44,11 @@
     },
     {
       "builtin": "liked"
+    },
+    {
+      "title": "Recently played",
+      "page": "recent",
+      "icon": "star"
     },
     {
       "title": "Music cloud",
