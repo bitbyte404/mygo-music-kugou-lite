@@ -1,0 +1,21 @@
+{
+  "id": "kugou-lite",
+  "name": "Kugou Concept",
+  "version": "1.0.0",
+  "minAppVersion": "0.1.8",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": ["gateway.kugou.com", "openapi.kugou.com", "login-user.kugou.com", "lyrics.kugou.com", "krcs.kugou.com", "kugouvip.kugou.com", "userservice.kugou.com"]
+  },
+  "settings": [
+    { "key": "autoVip", "label": "Daily free VIP", "help": "Claims the Concept Edition's free VIP once a day while signed in. Enter 0 to turn it off." }
+  ],
+  "navigation": [
+    { "builtin": "home" },
+    { "title": "Daily picks", "page": "daily", "icon": "calendar" },
+    { "title": "Charts", "page": "charts", "icon": "chart" },
+    { "title": "Private FM", "builtin": "stations" },
+    { "builtin": "liked" }
+  ]
+}
