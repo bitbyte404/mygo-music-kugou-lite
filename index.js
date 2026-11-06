@@ -1083,7 +1083,8 @@ export async function artist({ id }) {
 
 // ---------- playback ----------
 
-const QUALITY = { standard: ["128"], high: ["320", "128"], lossless: ["flac", "320", "128"] };
+// "high" is Kugou's Hi-Res (24-bit FLAC); the app's highest level asks for it first.
+const QUALITY = { standard: ["128"], high: ["320", "128"], lossless: ["high", "flac", "320", "128"] };
 
 export async function stream({ id, quality }) {
   if (String(id).endsWith(CLOUD_TAG)) return cloudStream(String(id));
@@ -1114,6 +1115,7 @@ export async function stream({ id, quality }) {
     }
     const ext = String(d.extName || d.ext || url.split("?")[0].split(".").pop()).toLowerCase();
     if (!["mp3", "flac", "ogg"].includes(ext)) continue; // what the app plays
+    if (q === "high" && ext !== "flac") continue; // Hi-Res or nothing: else plain FLAC is better
     let kbps = Number(d.bitRate || d.bitrate || 0);
     if (kbps > 10000) kbps = Math.round(kbps / 1000);
     return {
