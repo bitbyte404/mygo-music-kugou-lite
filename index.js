@@ -607,6 +607,7 @@ export async function browse({ page }) {
   if (page === "daily") return { title: t("Daily picks"), sections: [{ tracks: await dailyTracks(), empty: t("Nothing today") }] };
   if (page === "new") return { title: t("New songs"), sections: [{ tracks: await newSongs() }] };
   if (page === "fm") return { title: t("Private FM"), sections: [{ stations: await stations() }] };
+  if (page === "cloud") return { title: t("Music cloud"), sections: [{ tracks: await cloudDrive(), empty: t("Nothing in your music cloud") }] };
   if (page === "charts") {
     const rs = await ranks();
     return {
@@ -1066,6 +1067,7 @@ export async function artist({ id }) {
 const QUALITY = { standard: ["128"], high: ["320", "128"], lossless: ["flac", "320", "128"] };
 
 export async function stream({ id, quality }) {
+  if (String(id).endsWith(CLOUD_TAG)) return cloudStream(String(id));
   const p = parseId(id);
   const a = auth();
   let lastErr;
@@ -1226,6 +1228,83 @@ export async function stationNext({ id }) {
   if (a.userid) Object.assign(body, { userid: Number(a.userid), kguid: Number(a.userid), token: a.token });
   const d = await kg("/v2/personal_recommend", { body, router: "persnfm.service.kugou.com" });
   return tracksOf(list(d.song_list, d.songs, d.list));
+}
+
+// ---------- 音乐云盘: the songs the listener uploaded to Kugou ----------
+
+// Its songs carry "_c" after the usual id, so they play from the cloud drive.
+const CLOUD_TAG = "_c";
+
+// One call to the cloud drive service: the same AES body and RSA key as the
+// cloud lists, sent to mcloudservice as raw bytes with only these params.
+async function mcloud(path, data) {
+  await ensureDevice();
+  const a = needSignIn();
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const aes = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * 36)]).join("");
+  const h = md5(aes);
+  const key = utf8(h.slice(0, 16)), iv = utf8(h.slice(16, 32));
+  const clienttime = now();
+  const params = {
+    clienttime, mid: mid(), key: md5(`${APP_ID}${CLOUD_KEY}${CLIENT_VER}${clienttime}`), clientver: CLIENT_VER, appid: APP_ID,
+    p: rsaPkcs1(JSON.stringify({ aes, uid: Number(a.userid), token: a.token })).toUpperCase(),
+  };
+  const qs = Object.keys(params).map((k) => `${k}=${encodeURIComponent(params[k])}`).join("&");
+  const res = await fetch(`https://mcloudservice.kugou.com${path}?${qs}`, {
+    method: "POST",
+    headers: {
+      "User-Agent": UA, dfid: dfid(), mid: params.mid, clienttime: String(clienttime),
+      "kg-rc": "1", "kg-thash": "5d816a0", "kg-rec": "1", "kg-rf": "B9EDA08A64250DEFFBCADDEE00F8F25F",
+    },
+    body: cbcEncrypt(utf8(JSON.stringify(data)), key, iv),
+  });
+  const raw = new Uint8Array(await res.arrayBuffer());
+  let text;
+  try {
+    text = new TextDecoder().decode(cbcDecrypt(raw, key, iv));
+    JSON.parse(text);
+  } catch {
+    text = new TextDecoder().decode(raw);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    throw new Error(`${t("Kugou sent something unreadable")} (${path})`);
+  }
+  const code = Number(json.error_code || 0);
+  if (json.status === 0 || code) throw new Error(`${t("Kugou said no")} (${code || json.status} ${path})`);
+  return json.data || json;
+}
+
+async function cloudDrive() {
+  const all = [];
+  for (let page = 1; page <= 20; page++) {
+    const d = await mcloud("/v1/get_list", { page, pagesize: 100, getkmr: 1 });
+    const items = list(d.list, d.info, d.songs, d);
+    for (const s of items) {
+      const tr = toTrack(s);
+      if (tr) all.push({ ...tr, id: tr.id + CLOUD_TAG });
+    }
+    const total = Number(d.list_count || d.total || d.count || 0);
+    if (items.length < 100 || (total && all.length >= total)) break;
+  }
+  return all;
+}
+
+async function cloudStream(id) {
+  const p = parseId(id.slice(0, -CLOUD_TAG.length));
+  const hash = p.hash.toLowerCase();
+  const params = {
+    hash, ssa_flag: "is_fromtrack", version: "20102", ssl: 0, album_audio_id: p.mix, pid: 20026, audio_id: 0, kv_id: 2,
+    key: md5(`musicclound${hash}20026ebd1ac3134c880bda6a2194537843caa0162e2e7`), bucket: "musicclound", name: "", with_res_tag: 0,
+  };
+  const d = await kg("/bsstrackercdngz/v2/query_musicclound_url", { params });
+  let url = [d.url, d.backup_url, d.data?.url, d.data?.backup_url].find((u) => typeof u === "string" && u.startsWith("http"));
+  if (!url) throw fail("unavailable", t("Kugou won't play this one: VIP or copyright"));
+  url = url.replace(/^http:/, "https:");
+  const ext = String(d.extName || d.data?.extName || url.split("?")[0].split(".").pop()).toLowerCase();
+  return { url, type: ["mp3", "flac", "ogg"].includes(ext) ? ext : "mp3", quality: ext === "flac" ? "lossless" : "high" };
 }
 
 // ---------- inflate: tiny-inflate 1.0.3, (c) Devon Govett, MIT ----------
