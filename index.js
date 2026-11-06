@@ -771,12 +771,21 @@ async function likedIndex(refresh) {
   return idx;
 }
 
+// Kugou gives a list oldest first; 我喜欢 reads newest first, as in Kugou's app.
+// The whole list is read once when its first page is asked for, and the
+// pages after it come from that read.
+let likedRead = null;
+
 export async function liked({ offset = 0 }) {
   needSignIn();
-  const listid = await likedListId();
-  const page = Math.floor(offset / 100) + 1;
-  const { tracks, total } = await listTracks(listid, page, 100);
-  return { tracks, more: page * 100 < total };
+  if (offset === 0 || !likedRead || Date.now() - likedRead.at > 10 * 60 * 1000) {
+    const listid = await likedListId();
+    const tracks = (await allListTracks(listid)).reverse();
+    likedRead = { at: Date.now(), tracks };
+    store.set("likedIndex", { at: Date.now(), listid, hashes: tracks.map((x) => parseId(x.id).hash) });
+  }
+  const tracks = likedRead.tracks.slice(offset, offset + 100);
+  return { tracks, more: offset + 100 < likedRead.tracks.length };
 }
 
 export async function isLiked({ ids }) {
@@ -819,6 +828,7 @@ export async function like({ id, on }) {
   const h = parseId(id).hash;
   idx.hashes = on ? [...new Set([...idx.hashes, h])] : idx.hashes.filter((x) => x !== h);
   store.set("likedIndex", idx);
+  likedRead = null;
 }
 
 export async function addToPlaylist({ id, trackIds }) {
