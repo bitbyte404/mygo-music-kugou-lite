@@ -695,7 +695,34 @@ export async function playlists() {
   const a = auth();
   const lists = await myLists();
   const liked = likedList(lists);
-  return lists.filter((l) => l !== liked).map((l) => myPlaylist(l, a.userid));
+  const own = lists.filter((l) => l !== liked);
+  const out = own.map((l) => myPlaylist(l, a.userid));
+  await fillOwnCovers(own, out);
+  return out;
+}
+
+// Kugou leaves pic empty on own lists without a custom cover; its app shows the first song's cover.
+// Fetch that one song per list, cached by list_ver so it is only refetched after the list changes.
+async function fillOwnCovers(lists, out) {
+  const cache = store.get("listCovers", {});
+  const next = {};
+  await Promise.all(out.map(async (p, i) => {
+    const l = lists[i];
+    if (!p.mine || p.imageUrl || !Number(l.count)) return;
+    const key = String(l.listid), ver = String(l.list_ver ?? "");
+    let url = cache[key]?.ver === ver ? cache[key].url : undefined;
+    if (url === undefined) {
+      try {
+        const { tracks } = await listTracks(l.listid, 1, 1);
+        url = tracks[0]?.album?.imageUrl || "";
+      } catch {
+        return;
+      }
+    }
+    next[key] = { ver, url };
+    if (url) p.imageUrl = url;
+  }));
+  store.set("listCovers", next);
 }
 
 async function listTracks(listid, page = 1, pagesize = 300) {
