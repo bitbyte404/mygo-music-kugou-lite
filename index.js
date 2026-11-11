@@ -668,7 +668,7 @@ async function myLists() {
   const body = { userid: String(a.userid), token: String(a.token), total_ver: 979, type: 2, page: 1, pagesize: 200 };
   const d = await kg("/v7/get_all_list", { body, params: { plat: 1, userid: Number(a.userid), token: a.token }, router: "cloudlist.service.kugou.com" });
   const lists = list(d.info, d.list);
-  store.set("myLists", lists.map((l) => ({ listid: l.listid, gid: l.global_collection_id, cgid: l.list_create_gid, name: l.name, mine: Number(l.type) !== 1 && Number(l.list_create_userid) === Number(a.userid), type: l.type })));
+  store.set("myLists", lists.map((l) => ({ listid: l.listid, gid: l.global_collection_id, cgid: l.list_create_gid, name: l.name, pic: l.pic || l.cover || "", intro: l.intro || "", mine: Number(l.type) !== 1 && Number(l.list_create_userid) === Number(a.userid), type: l.type })));
   return lists;
 }
 
@@ -750,7 +750,9 @@ export async function playlist({ id }) {
     const listid = id.slice(1);
     const meta = store.get("myLists", []).find((l) => String(l.listid) === listid) || {};
     const tracks = await allListTracks(listid);
-    return { id, name: meta.name || t("Playlist"), mine: true, trackCount: tracks.length, tracks };
+    // Kugou leaves pic empty on lists without a custom cover; its app shows the first song's cover then.
+    const imageUrl = img(meta.pic) || tracks.find((x) => x.album?.imageUrl)?.album.imageUrl;
+    return { id, name: meta.name || t("Playlist"), imageUrl, description: meta.intro || undefined, mine: true, trackCount: tracks.length, tracks };
   }
   const [info, tracks] = await Promise.all([playlistInfo(id).catch(() => ({})), publicTracks(id)]);
   const saved = store.get("myLists", []).some((l) => (l.gid === id || l.cgid === id) && !l.mine);
