@@ -37,6 +37,22 @@
 - 能不能播、能播什么音质取决于你的账号：未登录只能播免费歌曲，VIP 歌曲需要登录并领取 VIP。
 - 「默认收藏」和「我喜欢」是酷狗自带的列表，不能删除。
 
+## 暂不支持
+
+酷狗没有提供接口（MyGo 本身支持，以后有接口再加）：
+
+- 收藏专辑、查看收藏的专辑
+- 订阅有声书、给有声书单集点赞
+- 给评论点赞
+- 远程控制其他设备播放
+
+MyGo 不支持（酷狗 App 有）：
+
+- MV / 视频
+- Hi-Res 标识（Hi-Res 能播，只是显示为无损）
+- 楼中楼回复、专辑和歌单评论（MyGo 只有歌曲评论）
+- 一起听、弹幕、音效、云盘上传、乐谱、登录设备管理
+
 ## 致谢
 
 接口与签名参考 [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（MIT）；KRC 解压用 [tiny-inflate](https://github.com/foliojs/tiny-inflate)（MIT）。
