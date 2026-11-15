@@ -687,6 +687,7 @@ export async function home() {
     links: [
       { title: t("Charts"), subtitle: t("Kugou's charts"), page: "charts" },
       { title: t("Private FM"), subtitle: t("Endless songs picked for you"), page: "fm" },
+      { title: t("Discover"), subtitle: t("Playlists, new albums, artists and more"), page: "discover" },
       { title: t("Audiobooks"), subtitle: t("Novels, talks and radio dramas"), page: "audiobooks" },
     ],
   });
@@ -729,12 +730,27 @@ export async function browse({ page }) {
     sections.push({
       links: [
         { title: t("Followed artists"), subtitle: t("The artists you follow"), page: "following" },
+        { title: t("My listening chart"), subtitle: t("What you play most"), page: "listen" },
+        { title: t("Purchased songs"), subtitle: t("Songs you bought on Kugou"), page: "bought" },
         { title: t("Claim today's VIP again"), subtitle: t("Concept Edition's free daily VIP"), page: "vip" },
       ],
     });
     const me = store.get("account", {});
     return { title: me.name || a.userid, imageUrl: me.imageUrl, description: lines.join("\n") || undefined, sections };
   }
+  if (page === "discover") return discoverPage();
+  if (page === "square") return squarePage();
+  if (page.startsWith("plTag:")) return playlistTagPage(page.slice(6));
+  if (page === "newAlbums") return { title: t("New albums"), sections: await newAlbums(PAGE) };
+  if (page.startsWith("theme:")) return themePage(page.slice(6));
+  if (page.startsWith("scene:")) return scenePage(page.slice(6));
+  if (page.startsWith("singers:")) return singersPage(page.slice(8));
+  if (page === "ai") return aiPage();
+  if (page.startsWith("similar:")) return similarPage(page.slice(8));
+  if (page === "hot") return hotPage();
+  if (page.startsWith("q:")) return queryPage(page.slice(2));
+  if (page === "listen") return listenPage();
+  if (page === "bought") return purchasedPage();
   if (page === "audiobooks") return audiobooksPage();
   if (page.startsWith("books:")) return audiobookTagPage(page.slice(6));
   if (page === "following") {
@@ -755,6 +771,236 @@ export async function browse({ page }) {
     return { title: t("Albums"), sections: [{ albums: await artistAlbums(id, 100) }] };
   }
   throw fail("unavailable", "no such page");
+}
+
+// ---------- more to discover ----------
+
+// The playlist square: Kugou's recommended playlists, of one category or all.
+async function squarePlaylists(categoryid = 0, pagesize = PAGE) {
+  const clienttime = String(now());
+  const body = {
+    appid: APP_ID, mid: mid(), clientver: CLIENT_VER, platform: "android", clienttime,
+    userid: Number(auth().userid || 0), module_id: 1, page: 1, pagesize,
+    key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`),
+    special_recommend: { withtag: 1, withsong: 1, sort: 1, ugc: 1, is_selected: 0, withrecommend: 1, area_code: 1, categoryid: Number(categoryid) },
+    req_multi: 1, retrun_min: 5, return_special_falg: 1,
+  };
+  const d = await kg("/v2/special_recommend", { body, router: "specialrec.service.kugou.com" });
+  return list(d.special_list, d.list).map(toPlaylist).filter((x) => x.id);
+}
+
+async function playlistTags() {
+  const d = await kg("/pubsongs/v1/get_tags_by_type", { body: { tag_type: "collection", tag_id: 0, source: 3 } });
+  return list(d, d.info, d.list).filter((g) => list(g.son).length);
+}
+
+async function squarePage() {
+  const [lists, tags] = await Promise.all([squarePlaylists(0, 40), playlistTags().catch(() => [])]);
+  const sections = [{ title: t("Recommended playlists"), playlists: lists }];
+  for (const g of tags) sections.push({ title: String(g.tag_name), links: list(g.son).map((x) => ({ title: String(x.tag_name), page: `plTag:${x.tag_id}` })) });
+  return { title: t("Playlist square"), sections };
+}
+
+async function playlistTagPage(id) {
+  const [lists, tags] = await Promise.all([squarePlaylists(id, PAGE), playlistTags().catch(() => [])]);
+  const tag = tags.flatMap((g) => list(g.son)).find((x) => String(x.tag_id) === String(id));
+  return { title: tag ? String(tag.tag_name) : t("Playlists"), sections: [{ playlists: lists, empty: t("Nothing here yet") }] };
+}
+
+// New albums, by where they're from, as Kugou groups them.
+const REGIONS = { chn: "Chinese", eur: "Western", jpn: "Japanese", kor: "Korean" };
+async function newAlbums(pagesize = PAGE) {
+  const d = await kg("/musicadservice/v1/mobile_newalbum_sp", { body: { apiver: 20, token: auth().token || "", page: 1, pagesize, withpriv: 1 } });
+  return Object.entries(d)
+    .filter(([, v]) => Array.isArray(v))
+    .map(([k, v]) => ({ title: REGIONS[k] ? t(REGIONS[k]) : k, albums: v.map(toAlbum).filter((a) => a.id) }))
+    .filter((x) => x.albums.length);
+}
+
+async function themes() {
+  const d = await kg("/v2/getthemelist", {
+    body: { platform: "android", clientver: CLIENT_VER, clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0) },
+    router: "everydayrec.service.kugou.com",
+  });
+  return list(d.theme_list, d.list).filter((x) => x.id);
+}
+
+async function themePage(id) {
+  const d = await kg("/v2/gettheme_songidlist", {
+    body: { platform: "android", clientver: CLIENT_VER, clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0), theme_id: Number(id) },
+    router: "everydayrec.service.kugou.com",
+  });
+  const th = d.theme_detail || {};
+  return { title: String(th.title || t("Themes")), description: String(th.intro || "") || undefined, sections: [{ tracks: tracksOf(list(d.song_list)) }] };
+}
+
+async function scenes() {
+  const d = await kg("/scene/v1/scene/list");
+  return list(d.list).filter((x) => x.scene_id && Number(x.is_publish ?? 1) === 1);
+}
+
+// A scene's songs, as Kugou's scene music recommends them for it.
+async function scenePage(id) {
+  const [all, d] = await Promise.all([
+    scenes().catch(() => []),
+    kg("/genesisapi/v1/scene_music/rec_music", { params: { scene_id: id, page: 1, pagesize: PAGE }, body: { exposure: [] } }),
+  ]);
+  const sc = all.find((x) => String(x.scene_id) === String(id)) || {};
+  const tracks = tracksOf(list(d.list).map((x) => x.song).filter((x) => x && x.hash));
+  return { title: String(sc.title || t("Scenes")), description: String(sc.label || sc.intro || "") || undefined, sections: [{ tracks, empty: t("Nothing here yet") }] };
+}
+
+// Artists by where they sing, the most popular first.
+const SINGER_TYPES = [
+  { key: "0", name: "All" }, { key: "1", name: "Chinese" }, { key: "7", name: "Cantonese" }, { key: "8", name: "Hokkien" },
+  { key: "6", name: "Korean" }, { key: "5", name: "Japanese" }, { key: "2", name: "Western" }, { key: "0m", name: "Independent musicians" }, { key: "4", name: "Other" },
+];
+const SINGER_SEX = [{ key: 0, name: "All" }, { key: 1, name: "Male" }, { key: 2, name: "Female" }, { key: 3, name: "Groups" }];
+
+async function singersPage(spec) {
+  const [type = "0", sex = "0"] = spec.split(":");
+  const musician = type.endsWith("m") ? 3 : 0;
+  const d = await kg("/ocean/v6/singer/list", { params: { hotsize: 100, musician, sextype: Number(sex), showtype: 2, type: Number(type.replace("m", "")) } });
+  const groups = list(d.info);
+  const hot = groups.find((g) => g.title === "热门") || groups[0] || {};
+  const artists = list(hot.singer).map(toArtist).filter((a) => a.id && a.id !== "0");
+  const name = SINGER_TYPES.find((x) => x.key === type)?.name || "Artists";
+  return {
+    title: t(name === "All" ? "Artists" : name),
+    sections: [
+      { links: SINGER_SEX.filter((x) => String(x.key) !== sex).map((x) => ({ title: t(x.name), page: `singers:${type}:${x.key}` })) },
+      { title: sex !== "0" ? t(SINGER_SEX.find((x) => String(x.key) === sex)?.name || "") : t("Popular"), artists, empty: t("Nothing here yet") },
+    ],
+  };
+}
+
+// Songs Kugou's AI picks: for the listener, and like the songs they played.
+async function aiSongs(pagesize = PAGE) {
+  const d = await kg("/concepts/v1/ai/recommend_song", { body: { apiver: 2, source: 2, pagesize, page: 1 } });
+  return tracksOf(list(d.list, d.song_list));
+}
+
+async function likeThese(mixes) {
+  const clienttime = Date.now();
+  const body = {
+    platform: "ios", clientver: CLIENT_VER, clienttime, userid: Number(auth().userid || 0), client_playlist: [], source_type: 2, playlist_ver: 2,
+    area_code: 1, appid: APP_ID, key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`), mid: mid(), recommend_source: mixes.map((ID) => ({ ID: Number(ID) })),
+  };
+  const d = await kg("/recommend", { bare: true, body, router: "songlistairec.kugou.com" });
+  return tracksOf(list(d.song_list, d.list));
+}
+
+// The few songs played last, to ask for more like them.
+async function lastPlayed(n = 3) {
+  const a = auth();
+  if (!a.token) return [];
+  const d = await kg("/playhistory/v1/get_songs", { body: { token: a.token, userid: Number(a.userid), source_classify: "app", to_subdivide_sr: 1 } });
+  return list(d.songs).sort((x, y) => Number(y.ot || 0) - Number(x.ot || 0)).map((x) => ({ mix: x.mxid || x.info?.mixsongid, name: x.info?.name })).filter((x) => x.mix).slice(0, n);
+}
+
+async function aiPage() {
+  const seeds = await lastPlayed(3).catch(() => []);
+  const [picks, like] = await Promise.all([aiSongs(PAGE).catch(() => []), seeds.length ? likeThese(seeds.map((x) => x.mix)).catch(() => []) : []]);
+  const sections = [];
+  if (like.length) sections.push({ title: t("Like what you played lately"), tracks: like });
+  sections.push({ title: t("AI picks"), tracks: picks, empty: t("Nothing here yet") });
+  return { title: t("AI picks"), sections };
+}
+
+// Playlists like one the listener saved: Kugou's similar lists of it.
+async function similarPlaylists(gid) {
+  const clienttime = Date.now();
+  const d = await kg("/pubsongs/v1/kmr_get_similar_lists", {
+    body: {
+      appid: APP_ID, clientver: CLIENT_VER, clienttime, key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`), userid: Number(auth().userid || 0),
+      ugc: 1, show_list: 1, need_songs: 0, data: [{ global_collection_id: gid }],
+    },
+  });
+  return list(list(d)[0]?.collection_list).map((r) => ({
+    ...toPlaylist({ ...r, specialname: r.collection_name, nickname: r.user_name, songcount: r.song_count }),
+  })).filter((x) => x.id && x.id !== gid);
+}
+
+async function similarPage(gid) {
+  const info = await playlistInfo(gid).catch(() => ({}));
+  const name = String(info.specialname || info.name || "");
+  return { title: t("Similar playlists"), subtitle: name || undefined, sections: [{ playlists: await similarPlaylists(gid), empty: t("Nothing here yet") }] };
+}
+
+// What Kugou's search is hot on now, a list of words per chart; each opens
+// that search's songs.
+async function hotPage() {
+  const d = await kg("/api/v3/search/hot_tab", { params: { navid: 1, plat: 2 }, router: "msearch.kugou.com" });
+  return {
+    title: t("Hot searches"),
+    sections: list(d.list).map((g) => ({
+      title: String(g.name),
+      links: list(g.keywords).filter((k) => k.keyword).map((k) => ({ title: String(k.keyword), subtitle: k.reason && k.reason !== k.keyword ? String(k.reason) : undefined, page: `q:${k.keyword}` })),
+    })).filter((x) => x.links.length),
+  };
+}
+
+async function queryPage(q) {
+  const r = await search({ query: q, kind: "tracks", offset: 0 });
+  return { title: q, sections: [{ tracks: r.tracks, empty: t("Nothing found") }] };
+}
+
+// The listener's own listening chart: this week's and all time's.
+async function listenRank(type) {
+  const a = needSignIn();
+  const clienttime = now();
+  const body = { t_userid: Number(a.userid), userid: Number(a.userid), list_type: type, area_code: 1, cover: 2, p: rsaRaw(JSON.stringify({ clienttime, token: a.token })).toUpperCase() };
+  const d = await kg("/v2/get_list", { base: "https://listenservice.kugou.com", params: { clienttime, plat: 0 }, body });
+  return tracksOf(list(d.lists, d.list));
+}
+
+async function listenPage() {
+  const [week, all] = await Promise.all([listenRank(0).catch(() => []), listenRank(1).catch(() => [])]);
+  return {
+    title: t("My listening chart"),
+    sections: [
+      { title: t("This week"), tracks: week, empty: t("Nothing this week yet") },
+      { title: t("All time"), tracks: all, empty: t("Nothing yet") },
+    ],
+  };
+}
+
+async function purchasedPage() {
+  const a = needSignIn();
+  const all = [];
+  for (let page = 1; page <= 10; page++) {
+    const d = await kg("/openapi/copyright/v1/audio/get_goods", {
+      body: { appid: APP_ID, userid: Number(a.userid), token: a.token, page, pagesize: 50, clientver: String(CLIENT_VER), deleted: 0, need_audio_info: 1, area_code: "1" },
+    });
+    const goods = list(d.goods, d.list);
+    all.push(...goods.map((g) => g.audio_info || g.audio || g));
+    if (goods.length < 50 || all.length >= Number(d.total || 0)) break;
+  }
+  return { title: t("Purchased songs"), sections: [{ tracks: tracksOf(all), empty: t("You haven't bought any songs") }] };
+}
+
+// The Discover page: a little of each, with a way into the rest.
+async function discoverPage() {
+  const saved = signedIn() ? store.get("myLists", []).find((l) => !l.mine && (l.cgid || l.gid)) : null;
+  const [ai, lists, albums, th, sc, similar] = await Promise.all([
+    aiSongs(10).catch(() => []),
+    squarePlaylists(0, 12).then((x) => x.slice(0, 12)).catch(() => []),
+    newAlbums(6).catch(() => []),
+    themes().catch(() => []),
+    scenes().catch(() => []),
+    saved ? similarPlaylists(saved.cgid || saved.gid).catch(() => []) : [],
+  ]);
+  const sections = [];
+  if (ai.length) sections.push({ title: t("AI picks"), tracks: ai, morePage: "ai" });
+  if (lists.length) sections.push({ title: t("Playlist square"), playlists: lists, morePage: "square" });
+  const fresh = albums.flatMap((g) => g.albums.slice(0, 3));
+  if (fresh.length) sections.push({ title: t("New albums"), albums: fresh, morePage: "newAlbums" });
+  if (similar.length) sections.push({ title: `${t("More like")} ${saved.name}`, playlists: similar.slice(0, 12), morePage: `similar:${saved.cgid || saved.gid}` });
+  if (sc.length) sections.push({ title: t("Scenes"), links: sc.map((x) => ({ title: String(x.title), subtitle: String(x.label || "") || undefined, page: `scene:${x.scene_id}` })) });
+  if (th.length) sections.push({ title: t("Themes"), links: th.map((x) => ({ title: String(x.title), subtitle: String(x.intro || "") || undefined, page: `theme:${x.id}` })) });
+  sections.push({ title: t("Artists"), links: SINGER_TYPES.map((x) => ({ title: t(x.name === "All" ? "All artists" : x.name), page: `singers:${x.key}:0` })) });
+  sections.push({ links: [{ title: t("Hot searches"), subtitle: t("What everyone is searching for"), page: "hot" }] });
+  return { title: t("Discover"), sections };
 }
 
 // ---------- long audio: audiobooks and radio shows ----------
