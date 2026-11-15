@@ -509,6 +509,56 @@ async function claimVip(force) {
 // ---------- search ----------
 
 const SEARCH = { tracks: "song", albums: "album", artists: "author", playlists: "special" };
+const ENTITLEMENT_QUALITIES = ["128", "320", "flac", "high", "viper_atmos", "viper_tape", "viper_clear", "super", "multitrack"];
+const QUALITY_BY_LEVEL = { 1: "128", 2: "128", 4: "320", 5: "flac", 6: "high" };
+
+async function markUnavailableTracks(tracks) {
+  if (!signedIn()) return tracks;
+
+  const groups = new Map();
+  for (const track of tracks) {
+    const id = parseId(track.id);
+    const hash = id.hash.toLowerCase();
+    if (!/^[0-9a-f]{32}$/.test(hash)) continue;
+    const group = groups.get(hash);
+    if (!group) groups.set(hash, { album: id.album, tracks: [track] });
+    else if (group.album === id.album) group.tracks.push(track);
+    else group.album = null; // The same hash can appear in different album contexts.
+  }
+  const resource = [];
+  for (const [hash, group] of groups) {
+    if (group.album !== null) resource.push({ type: "audio", page_id: 0, hash, album_id: group.album });
+  }
+  if (!resource.length) return tracks;
+
+  let response;
+  try {
+    response = await kg("/v2/get_res_privilege/lite", {
+      router: "media.store.kugou.com",
+      body: { appid: APP_ID, area_code: 1, behavior: "play", clientver: CLIENT_VER,
+        need_hash_offset: 1, relate: 1, support_verify: 1, resource, qualities: ENTITLEMENT_QUALITIES },
+    });
+  } catch {
+    return tracks; // Rights are unknown when the extra request fails.
+  }
+
+  const byHash = new Map();
+  for (const row of list(response)) {
+    const hash = String(row?.hash || "").toLowerCase();
+    if (hash) byHash.set(hash, byHash.has(hash) ? null : row);
+  }
+  for (const { hash, album_id: album } of resource) {
+    const row = byHash.get(hash);
+    if (!row || (album && Number(row.album_id) && Number(row.album_id) !== album)) continue;
+    const goods = list(row.relate_goods).filter(Boolean);
+    const denied = QUALITY.lossless.every((quality) => {
+      const variants = goods.filter((item) => String(item.quality ?? QUALITY_BY_LEVEL[item.level]) === quality);
+      return variants.length > 0 && variants.every(({ status }) => status === 0 || status === "0");
+    });
+    if (denied) for (const track of groups.get(hash).tracks) track.unavailable = true;
+  }
+  return tracks;
+}
 
 export async function search({ query, kind, offset = 0 }) {
   const type = SEARCH[kind];
@@ -528,7 +578,7 @@ export async function search({ query, kind, offset = 0 }) {
   }
   const total = Number(d.total || 0);
   const more = total ? page * size < total : items.length >= size;
-  if (type === "song") return { tracks: tracksOf(items), more };
+  if (type === "song") return { tracks: await markUnavailableTracks(tracksOf(items)), more };
   if (type === "album") return { albums: items.map(toAlbum).filter((a) => a.id), more };
   if (type === "author") return { artists: items.map(toArtist).filter((a) => a.id), more };
   return { playlists: items.map(toPlaylist).filter((p) => p.id), more };
