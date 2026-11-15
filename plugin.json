@@ -20,6 +20,22 @@
   },
   "settings": [
     {
+      "key": "platform",
+      "label": "Protocol",
+      "type": "select",
+      "help": "Concept Edition (default) gets the daily free VIP. Kugou Music uses the VIP bought in the regular Kugou app.",
+      "options": [
+        {
+          "value": "",
+          "label": "Kugou Concept (default)"
+        },
+        {
+          "value": "standard",
+          "label": "Kugou Music"
+        }
+      ]
+    },
+    {
       "key": "autoVip",
       "label": "Daily free VIP",
       "help": "Claims the Concept Edition's free VIP once a day while signed in. Enter 0 to turn it off."

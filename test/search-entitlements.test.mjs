@@ -21,12 +21,15 @@ const rights = (hash, verdict, album = 1) => ({
   hash, album_id: album, ...verdict, relate_goods: goods(verdict.privilege, verdict.status),
 });
 
-function mock(routes, { signedIn = true } = {}) {
-  const storage = new Map([["dfid", "test-device"], ["mid", "123"]]);
-  if (signedIn) storage.set("auth", { token: "fixture-only", userid: 1 });
+function mock(routes, { signedIn = true, platform } = {}) {
+  // The regular app keeps its own sign-in and device, under "std:".
+  const own = platform === "standard" ? "std:" : "";
+  const storage = new Map([[`${own}dfid`, "test-device"], ["mid", "123"]]);
+  if (signedIn) storage.set(`${own}auth`, { token: "fixture-only", userid: 1 });
   const requests = [];
   globalThis.host = {
     t: (text) => text,
+    setting: (key) => (key === "platform" ? platform : undefined),
     crypto: { md5: () => "0".repeat(32) },
     storage: { get: (key) => storage.get(key), set: (key, value) => storage.set(key, value), remove: (key) => storage.delete(key) },
   };
@@ -131,6 +134,27 @@ test("greys out songs on pages other than search, such as an album", async () =>
     const page = await album({ id: "7" });
     assert.deepEqual(page.tracks.map(({ name, unavailable }) => [name, unavailable]), [["Gone", true], ["Here", undefined]]);
     assert.equal(requests.filter((r) => r.path === "/v2/get_res_privilege/lite").length, 1);
+  } finally {
+    unmock();
+  }
+});
+
+test("on the regular Kugou app without VIP, greys out VIP songs that need the music pack", async () => {
+  const [pack, open, free] = [fresh(), fresh(), fresh()];
+  const songs = [song(pack, 1, "Needs VIP"), song(open, 1, "VIP but plays"), song(free, 1, "Free")];
+  const requests = mock({
+    "/v2/search/song": () => ({ lists: songs, total: songs.length }),
+    "/v1/get_union_vip": () => ({ is_vip: 0, busi_vip: [{ busi_type: "concept", is_vip: 1 }] }),
+    "/v2/get_res_privilege/lite": () => [
+      rights(pack, { ...VIP, trans_param: { musicpack_advance: 1 } }),
+      rights(open, { ...VIP, trans_param: { musicpack_advance: 0 } }),
+      rights(free, FREE),
+    ],
+  }, { platform: "standard" });
+  try {
+    const { tracks } = await search({ query: "sample", kind: "tracks" });
+    assert.deepEqual(tracks.map((track) => track.unavailable), [true, undefined, undefined]);
+    assert.equal(requests.find((r) => r.path === "/v2/search/song") !== undefined, true);
   } finally {
     unmock();
   }

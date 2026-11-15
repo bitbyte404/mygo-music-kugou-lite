@@ -4,21 +4,43 @@
 // No server, no helper program.
 
 const GATEWAY = "https://gateway.kugou.com";
-const APP_ID = 3116;
-const CLIENT_VER = 11440;
+// Two protocols: the Concept Edition's (default) and the regular Kugou app's,
+// picked in settings. They differ only in app id, version, salts and RSA key.
+const PLATFORMS = {
+  lite: {
+    appId: 3116, clientVer: 11440, salt: "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA", keySalt: "185672dd44712f60bb1736df5a377e82",
+    rsaN: "c40a2d0da76511f3bb1cc2bbd3afbd8bea83b4d6b05b6c13eb8920c53f1af7679b32ba0d0edb843240ef1b836efed3ee240734c14c1399fd6594d16af22f52525d14d72e0155c6dcc8638d4f7bb94f3a0b1f4c29f991972f2a160a25eb0a9e724336be7f69bbd319ffab1c6dd8470b021dc434f3faba89f4a2a01b33bdbdd08b",
+    pageId: 967177915, ppageId: "356753938,823673182,967485191", pid: 411, searchVer: 201,
+  },
+  standard: {
+    appId: 1005, clientVer: 20489, salt: "OIlwieks28dk2k092lksi2UIkp", keySalt: "57ae12eb6890223e355ccfcb74edf70d",
+    rsaN: "c8006ed03842d2628209bd314984ca5ed6cfe06e30c95f9d4704d9c49791d7a935ba950ecb0bc8ebf5f5994f0bac927a7eb151b3c1de343303fa539c83136eccfd7d7e511e2dbce18eaa9f784c9b50d443e75865979e0a5e216e46c684066a8d6b998580bbaa22d73f5790286bb14742e83244e44db6d707ffe162c5c7002d45",
+    pageId: 151369488, ppageId: "463467626,350369493,788954147", pid: 2, searchVer: undefined,
+  },
+};
+const platformName = () => (String(host.setting?.("platform") || "").trim().toLowerCase() === "standard" ? "standard" : "lite");
+const P = () => PLATFORMS[platformName()];
+const isLite = () => platformName() === "lite";
+const APP = () => P().appId;
+const VER = () => P().clientVer;
+const SALTP = () => P().salt;
+const KEY_SALTP = () => P().keySalt;
+const rsaN = () => BigInt("0x" + P().rsaN);
 const SRC_APP_ID = 2919;
-const SALT = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA";
-const KEY_SALT = "185672dd44712f60bb1736df5a377e82";
 const WEB_SALT = "NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt";
 const UA = "Android15-1070-11083-46-0-DiscoveryDRADProtocol-wifi";
 const PAGE = 30;
 
 const t = (s) => host.t(s);
 const md5 = (s) => host.crypto.md5(String(s));
+// Each protocol keeps its own sign-in, device and caches: a Concept Edition
+// token isn't accepted as the regular app's. Only the device id is shared.
+const SHARED = new Set(["guid", "mid"]);
+const sk = (k) => (SHARED.has(k) || isLite() ? k : `std:${k}`);
 const store = {
-  get: (k, d) => host.storage.get(k) ?? d,
-  set: (k, v) => host.storage.set(k, v),
-  del: (k) => host.storage.remove(k),
+  get: (k, d) => host.storage.get(sk(k)) ?? d,
+  set: (k, v) => host.storage.set(sk(k), v),
+  del: (k) => host.storage.remove(sk(k)),
 };
 
 function fail(code, message) {
@@ -81,7 +103,7 @@ function needSignIn() {
 const str = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
 function androidSign(params, body) {
   const canon = Object.keys(params).sort().map((k) => `${k}=${str(params[k])}`).join("");
-  return md5(`${SALT}${canon}${body || ""}${SALT}`);
+  return md5(`${SALTP()}${canon}${body || ""}${SALTP()}`);
 }
 function webSign(params) {
   const canon = Object.keys(params).sort().map((k) => `${k}=${params[k]}`).join("");
@@ -89,13 +111,28 @@ function webSign(params) {
 }
 const now = () => Math.floor(Date.now() / 1000);
 
+// Switching protocol in settings switches account too, so drop what was read
+// for the other one.
+let lastPlatform = null;
+function platformChanged() {
+  const p = platformName();
+  if (lastPlatform && lastPlatform !== p) {
+    rightsKnown.clear();
+    likedRead = null;
+    followRead = null;
+    vipKnown = null;
+  }
+  lastPlatform = p;
+}
+
 // One request to Kugou. opts: { base, method, params, body, router, headers,
 // form, bare (no default params), sign: "android" | "web" | false, raw }
 async function kg(path, opts = {}) {
+  platformChanged();
   if (!opts.noDevice) await ensureDevice();
   const a = auth();
   const clienttime = now();
-  const defaults = { dfid: dfid(), mid: mid(), uuid: "-", appid: APP_ID, clientver: CLIENT_VER, clienttime };
+  const defaults = { dfid: dfid(), mid: mid(), uuid: "-", appid: APP(), clientver: VER(), clienttime };
   if (a.token) defaults.token = a.token;
   if (a.userid) defaults.userid = a.userid;
   const params = opts.bare ? { ...(opts.params || {}) } : { ...defaults, ...(opts.params || {}) };
@@ -275,8 +312,6 @@ function cbcDecrypt(data, key, iv) {
 }
 const b64 = (bytes) => { let s = ""; for (const b of bytes) s += String.fromCharCode(b); return btoa(s); };
 
-// The Concept app's RSA public key, as its modulus and exponent.
-const RSA_N = BigInt("0xc40a2d0da76511f3bb1cc2bbd3afbd8bea83b4d6b05b6c13eb8920c53f1af7679b32ba0d0edb843240ef1b836efed3ee240734c14c1399fd6594d16af22f52525d14d72e0155c6dcc8638d4f7bb94f3a0b1f4c29f991972f2a160a25eb0a9e724336be7f69bbd319ffab1c6dd8470b021dc434f3faba89f4a2a01b33bdbdd08b");
 function modpow(b, e, m) {
   let r = 1n;
   b %= m;
@@ -293,7 +328,7 @@ function rsaPkcs1(text) {
   block.set(m, k - m.length);
   let x = 0n;
   for (const b of block) x = (x << 8n) | BigInt(b);
-  return modpow(x, 65537n, RSA_N).toString(16).padStart(256, "0");
+  return modpow(x, 65537n, rsaN()).toString(16).padStart(256, "0");
 }
 
 // The same key without padding, as the follow list wants it: the text
@@ -302,7 +337,7 @@ function rsaRaw(text) {
   const m = utf8(text);
   let x = 0n;
   for (let i = 0; i < 128; i++) x = (x << 8n) | BigInt(m[i] || 0);
-  return modpow(x, 65537n, RSA_N).toString(16).padStart(256, "0");
+  return modpow(x, 65537n, rsaN()).toString(16).padStart(256, "0");
 }
 
 // The follow service's encryption: JSON AES-256-CBC with md5 of a random
@@ -332,7 +367,7 @@ async function registerDevice() {
   const key = utf8(h.slice(0, 16)), iv = utf8(h.slice(16, 32));
   const body = b64(cbcEncrypt(utf8(JSON.stringify(info)), key, iv));
   const p = rsaPkcs1(JSON.stringify({ aes: k6, uid: Number(a.userid || 0), token: a.token || "" }));
-  const params = { dfid: "-", mid: mid(), uuid: "-", appid: APP_ID, clientver: CLIENT_VER, clienttime: now(), part: 1, platid: 1, p };
+  const params = { dfid: "-", mid: mid(), uuid: "-", appid: APP(), clientver: VER(), clienttime: now(), part: 1, platid: 1, p };
   if (a.token) params.token = a.token;
   if (a.userid) params.userid = a.userid;
   params.signature = androidSign(params, body);
@@ -457,14 +492,14 @@ function remember(key, map) {
 // ---------- sign in ----------
 
 async function loginApi(path, params) {
-  const p = { dfid: "-", mid: mid(), uuid: "-", appid: APP_ID, clientver: CLIENT_VER, clienttime: now(), ...params };
+  const p = { dfid: "-", mid: mid(), uuid: "-", appid: APP(), clientver: VER(), clienttime: now(), ...params };
   return kg(path, { base: "https://login-user.kugou.com", bare: true, params: p, sign: "web" });
 }
 
 export async function signIn() {
   const key = await loginApi("/v2/qrcode", {
     appid: 1001, type: 1, plat: 4, srcappid: SRC_APP_ID,
-    qrcode_txt: `https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=${APP_ID}&`,
+    qrcode_txt: `https://h5.kugou.com/apps/loginQRCode/html/index.html?appid=${APP()}&`,
   });
   const code = key.qrcode || key.key;
   if (!code) throw new Error(t("Kugou didn't give a QR code, try again"));
@@ -475,7 +510,7 @@ export async function signIn() {
     await new Promise((r) => setTimeout(r, 2000));
     let d;
     try {
-      d = await loginApi("/v2/get_userinfo_qrcode", { plat: 4, appid: APP_ID, srcappid: SRC_APP_ID, qrcode: code, dev: mid() });
+      d = await loginApi("/v2/get_userinfo_qrcode", { plat: 4, appid: APP(), srcappid: SRC_APP_ID, qrcode: code, dev: mid() });
     } catch {
       continue;
     }
@@ -515,6 +550,11 @@ function today() {
 
 async function vipInfo() {
   const d = await kg("/v1/get_union_vip", { base: "https://kugouvip.kugou.com", params: { busi_type: "concept" } });
+  // The regular app's VIP is the account's own; the Concept Edition's is its business VIP.
+  if (!isLite()) {
+    const end = String(d.su_vip_end_time || d.vip_end_time || "");
+    return { vip: Number(d.is_vip) === 1, end: Number(d.is_vip) === 1 ? end : "" };
+  }
   const busi = list(d.busi_vip, d.data?.busi_vip).filter((b) => Number(b.is_vip) === 1);
   const ends = busi.map((b) => String(b.vip_end_time || b.end_time || "")).filter(Boolean).sort();
   return { vip: busi.length > 0 || Number(d.is_vip) === 1, end: ends[ends.length - 1] || "" };
@@ -523,7 +563,7 @@ async function vipInfo() {
 // Claims the Concept Edition's free listening VIP for today, once a day.
 // force claims again even if this device already did today.
 async function claimVip(force) {
-  if (!signedIn() || host.setting("autoVip") === "0") return null;
+  if (!signedIn() || !isLite() || host.setting("autoVip") === "0") return null;
   if (!force && store.get("vipDay") === today()) return store.get("vipNote", null);
   let note;
   try {
@@ -562,7 +602,23 @@ const RIGHTS_AT_ONCE = 6;
 const RIGHTS_TTL = 30 * 60 * 1000;
 const rightsKnown = new Map(); // "hash:album" -> { at, denied }
 
-const deniedRights = (row) => /^deny/i.test(String(row?._msg || "")) || (Number(row?.privilege) === 5 && Number(row?.status) === 0);
+const deniedRights = (row, vipOk = true) =>
+  /^deny/i.test(String(row?._msg || "")) || (Number(row?.privilege) === 5 && Number(row?.status) === 0) ||
+  (!vipOk && Number(row?.privilege) === 10 && Number(row?.trans_param?.musicpack_advance) === 1);
+
+// The regular app has no free daily VIP: there a VIP song (privilege 10)
+// that asks for the music pack (musicpack_advance 1) only plays when the
+// account has bought VIP; checked against real plays of a 我喜欢 without
+// VIP. Asked once per half hour.
+let vipKnown = null;
+async function vipPlays() {
+  if (isLite()) return true;
+  if (vipKnown && Date.now() - vipKnown.at < RIGHTS_TTL) return vipKnown.vip;
+  const v = await vipInfo().catch(() => null);
+  if (!v) return true;
+  vipKnown = { at: Date.now(), vip: v.vip };
+  return v.vip;
+}
 
 async function rightsOf(resource) {
   const byHash = new Map();
@@ -572,7 +628,7 @@ async function rightsOf(resource) {
     const answers = await Promise.all(chunks.slice(i, i + RIGHTS_AT_ONCE).map((chunk) =>
       kg("/v2/get_res_privilege/lite", {
         router: "media.store.kugou.com",
-        body: { appid: APP_ID, area_code: 1, behavior: "play", clientver: CLIENT_VER,
+        body: { appid: APP(), area_code: 1, behavior: "play", clientver: VER(),
           need_hash_offset: 1, relate: 1, support_verify: 1, resource: chunk, qualities: ENTITLEMENT_QUALITIES },
       }).catch(() => [])));
     for (const row of answers.flatMap((d) => list(d))) {
@@ -614,10 +670,11 @@ async function markUnavailableTracks(tracks) {
     return tracks; // Rights are unknown when the extra request fails.
   }
   const at = Date.now();
+  const vipOk = await vipPlays();
   for (const { hash, album_id: album } of resource) {
     const row = byHash.get(hash);
     if (!row || (album && Number(row.album_id) && Number(row.album_id) !== album)) continue;
-    const denied = deniedRights(row);
+    const denied = deniedRights(row, vipOk);
     rightsKnown.set(`${hash}:${album}`, { at, denied });
     if (denied) for (const track of groups.get(hash).tracks) track.unavailable = true;
   }
@@ -638,7 +695,7 @@ export async function search({ query, kind, offset = 0 }) {
   const page = Math.floor(offset / size) + 1;
   const base = { keyword: query, page, pagesize: size, platform: "AndroidFilter", iscorrection: 1 };
   const params =
-    type === "song" ? { ...base, privilegefilter: 0, area_code: 1, dopicfull: 1, clientver: 201 }
+    type === "song" ? { ...base, privilegefilter: 0, area_code: 1, dopicfull: 1, ...(P().searchVer ? { clientver: P().searchVer } : {}) }
     : { ...base, albumhide: 0, nocollect: 0 };
   // Kugou's search now and then answers nothing for what it has: ask again.
   let d, items;
@@ -676,9 +733,9 @@ async function dailyTracks() {
 async function recommendedPlaylists() {
   const clienttime = String(now());
   const body = {
-    appid: APP_ID, mid: mid(), clientver: CLIENT_VER, platform: "android", clienttime,
+    appid: APP(), mid: mid(), clientver: VER(), platform: "android", clienttime,
     userid: String(auth().userid || 0), module_id: 1, page: 1, pagesize: PAGE,
-    key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`),
+    key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`),
     special_recommend: { withtag: 1, withsong: 1, sort: 1, ugc: 1, is_selected: 0, withrecommend: 1, area_code: 1, categoryid: 0 },
     req_multi: 1, retrun_min: 5, return_special_falg: 1,
   };
@@ -726,7 +783,7 @@ export async function home() {
     ],
   });
   await markSections(sections);
-  return { title: t("Kugou Concept"), subtitle: vip || undefined, sections };
+  return { title: isLite() ? t("Kugou Concept") : t("Kugou Music"), subtitle: vip || undefined, sections };
 }
 
 export async function browse({ page }) {
@@ -773,7 +830,7 @@ async function browsePage(page) {
         { title: t("Followed artists"), subtitle: t("The artists you follow"), page: "following" },
         { title: t("My listening chart"), subtitle: t("What you play most"), page: "listen" },
         { title: t("Purchased songs"), subtitle: t("Songs you bought on Kugou"), page: "bought" },
-        { title: t("Claim today's VIP again"), subtitle: t("Concept Edition's free daily VIP"), page: "vip" },
+        ...(isLite() ? [{ title: t("Claim today's VIP again"), subtitle: t("Concept Edition's free daily VIP"), page: "vip" }] : []),
       ],
     });
     const me = store.get("account", {});
@@ -820,9 +877,9 @@ async function browsePage(page) {
 async function squarePlaylists(categoryid = 0, pagesize = PAGE) {
   const clienttime = String(now());
   const body = {
-    appid: APP_ID, mid: mid(), clientver: CLIENT_VER, platform: "android", clienttime,
+    appid: APP(), mid: mid(), clientver: VER(), platform: "android", clienttime,
     userid: Number(auth().userid || 0), module_id: 1, page: 1, pagesize,
-    key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`),
+    key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`),
     special_recommend: { withtag: 1, withsong: 1, sort: 1, ugc: 1, is_selected: 0, withrecommend: 1, area_code: 1, categoryid: Number(categoryid) },
     req_multi: 1, retrun_min: 5, return_special_falg: 1,
   };
@@ -860,7 +917,7 @@ async function newAlbums(pagesize = PAGE) {
 
 async function themes() {
   const d = await kg("/v2/getthemelist", {
-    body: { platform: "android", clientver: CLIENT_VER, clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0) },
+    body: { platform: "android", clientver: VER(), clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0) },
     router: "everydayrec.service.kugou.com",
   });
   return list(d.theme_list, d.list).filter((x) => x.id);
@@ -868,7 +925,7 @@ async function themes() {
 
 async function themePage(id) {
   const d = await kg("/v2/gettheme_songidlist", {
-    body: { platform: "android", clientver: CLIENT_VER, clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0), theme_id: Number(id) },
+    body: { platform: "android", clientver: VER(), clienttime: Date.now(), area_code: 1, module_id: 1, userid: Number(auth().userid || 0), theme_id: Number(id) },
     router: "everydayrec.service.kugou.com",
   });
   const th = d.theme_detail || {};
@@ -924,8 +981,8 @@ async function aiSongs(pagesize = PAGE) {
 async function likeThese(mixes) {
   const clienttime = Date.now();
   const body = {
-    platform: "ios", clientver: CLIENT_VER, clienttime, userid: Number(auth().userid || 0), client_playlist: [], source_type: 2, playlist_ver: 2,
-    area_code: 1, appid: APP_ID, key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`), mid: mid(), recommend_source: mixes.map((ID) => ({ ID: Number(ID) })),
+    platform: "ios", clientver: VER(), clienttime, userid: Number(auth().userid || 0), client_playlist: [], source_type: 2, playlist_ver: 2,
+    area_code: 1, appid: APP(), key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`), mid: mid(), recommend_source: mixes.map((ID) => ({ ID: Number(ID) })),
   };
   const d = await kg("/recommend", { bare: true, body, router: "songlistairec.kugou.com" });
   return tracksOf(list(d.song_list, d.list));
@@ -953,7 +1010,7 @@ async function similarPlaylists(gid) {
   const clienttime = Date.now();
   const d = await kg("/pubsongs/v1/kmr_get_similar_lists", {
     body: {
-      appid: APP_ID, clientver: CLIENT_VER, clienttime, key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`), userid: Number(auth().userid || 0),
+      appid: APP(), clientver: VER(), clienttime, key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`), userid: Number(auth().userid || 0),
       ugc: 1, show_list: 1, need_songs: 0, data: [{ global_collection_id: gid }],
     },
   });
@@ -1011,7 +1068,7 @@ async function purchasedPage() {
   const all = [];
   for (let page = 1; page <= 10; page++) {
     const d = await kg("/openapi/copyright/v1/audio/get_goods", {
-      body: { appid: APP_ID, userid: Number(a.userid), token: a.token, page, pagesize: 50, clientver: String(CLIENT_VER), deleted: 0, need_audio_info: 1, area_code: "1" },
+      body: { appid: APP(), userid: Number(a.userid), token: a.token, page, pagesize: 50, clientver: String(VER()), deleted: 0, need_audio_info: 1, area_code: "1" },
     });
     const goods = list(d.goods, d.list);
     all.push(...goods.map((g) => g.audio_info || g.audio || g));
@@ -1472,7 +1529,6 @@ export async function recent() {
 
 // ---------- cloud playlists: Kugou's encrypted cloudlist protocol ----------
 
-const CLOUD_KEY = "LnT6xpN3khm36zse0QzvmgTZ3waWdRSA";
 const hexOf = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 // One cloudlist call: the body AES-CBC encrypted with a session key, the key
@@ -1486,8 +1542,8 @@ async function cloud(path, data) {
   const key = utf8(h.slice(0, 16)), iv = utf8(h.slice(16, 32));
   const clienttime = now();
   const params = {
-    appid: APP_ID, clientver: CLIENT_VER, mid: mid(), clienttime,
-    key: md5(`${APP_ID}${CLOUD_KEY}${CLIENT_VER}${clienttime}`),
+    appid: APP(), clientver: VER(), mid: mid(), clienttime,
+    key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`),
     dfid: dfid(),
     p: rsaPkcs1(JSON.stringify({ aes, uid: Number(a.userid), token: a.token })).toUpperCase(),
   };
@@ -1566,8 +1622,8 @@ async function cloudLegacy(path, data) {
   const clienttime = now();
   const body = b64(cbcEncrypt(utf8(JSON.stringify(data)), key, iv));
   const params = {
-    dfid: dfid(), mid: mid(), uuid: "-", appid: APP_ID, clientver: CLIENT_VER, clienttime, token: a.token, userid: a.userid,
-    key: md5(`${APP_ID}${CLOUD_KEY}${CLIENT_VER}${clienttime}`), last_area: "gztx", last_time: clienttime,
+    dfid: dfid(), mid: mid(), uuid: "-", appid: APP(), clientver: VER(), clienttime, token: a.token, userid: a.userid,
+    key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`), last_area: "gztx", last_time: clienttime,
     p: rsaPkcs1(JSON.stringify({ aes, uid: Number(a.userid), token: a.token })).toUpperCase(),
   };
   params.signature = androidSign(params, body);
@@ -1643,7 +1699,7 @@ export async function artist({ id }) {
   }
   const clienttime = now();
   const audiosBody = {
-    appid: APP_ID, clientver: CLIENT_VER, mid: mid(), clienttime, key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`),
+    appid: APP(), clientver: VER(), mid: mid(), clienttime, key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`),
     author_id: String(id), pagesize: 100, page: 1, sort: 1, area_code: "all",
   };
   const [detail, songs, albums] = await Promise.all([
@@ -1701,14 +1757,14 @@ export async function stream({ id, quality }) {
   let lastErr;
   for (const q of QUALITY[quality] || QUALITY.high) {
     const params = {
-      dfid: dfid(), mid: mid(), uuid: "-", appid: APP_ID, clientver: 11430, clienttime: now(),
+      dfid: dfid(), mid: mid(), uuid: "-", appid: APP(), clientver: 11430, clienttime: now(),
       album_id: p.album, area_code: 1, hash: p.hash.toLowerCase(), ssa_flag: "is_fromtrack", version: 11430,
-      page_id: 967177915, quality: q, album_audio_id: p.mix, behavior: "play", pid: 411, cmd: 26, pidversion: 3001,
-      IsFreePart: 0, ppage_id: "356753938,823673182,967485191", cdnBackup: 1, module: "",
+      page_id: P().pageId, quality: q, album_audio_id: p.mix, behavior: "play", pid: P().pid, cmd: 26, pidversion: 3001,
+      IsFreePart: 0, ppage_id: P().ppageId, cdnBackup: 1, module: "",
     };
     if (a.token) params.token = a.token;
     if (a.userid) params.userid = a.userid;
-    params.key = md5(`${params.hash}${KEY_SALT}${APP_ID}${params.mid}${params.userid || 0}`);
+    params.key = md5(`${params.hash}${KEY_SALTP()}${APP()}${params.mid}${params.userid || 0}`);
     let d;
     try {
       d = await kg("/v5/url", { bare: true, params, router: "trackercdn.kugou.com" });
@@ -1856,8 +1912,8 @@ function commentQuery(extra, keyTail) {
   const a = needSignIn();
   const clienttime = now();
   return {
-    ...extra, kugouid: a.userid, ver: 6, clienttoken: a.token, appid: APP_ID, clientver: CLIENT_VER, mid: mid(), clienttime,
-    key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}${mid()}${keyTail || ""}`), uuid: "-", dfid: dfid(),
+    ...extra, kugouid: a.userid, ver: 6, clienttoken: a.token, appid: APP(), clientver: VER(), mid: mid(), clienttime,
+    key: md5(`${APP()}${SALTP()}${VER()}${clienttime}${mid()}${keyTail || ""}`), uuid: "-", dfid: dfid(),
   };
 }
 
@@ -1901,9 +1957,9 @@ export async function stationNext({ id }) {
   const a = auth();
   const clienttime = Date.now();
   const body = {
-    appid: APP_ID, clienttime, mid: mid(), action: "play", recommend_source_locked: 0, song_pool_id: 0, callerid: 0, m_type: 1,
-    platform: "ios", area_code: 1, remain_songcnt: 0, clientver: CLIENT_VER, is_overplay: 0, mode: id || "normal",
-    fakem: "ca981cfc583a4c37f28d2d49000013c16a0a", key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}`),
+    appid: APP(), clienttime, mid: mid(), action: "play", recommend_source_locked: 0, song_pool_id: 0, callerid: 0, m_type: 1,
+    platform: "ios", area_code: 1, remain_songcnt: 0, clientver: VER(), is_overplay: 0, mode: id || "normal",
+    fakem: "ca981cfc583a4c37f28d2d49000013c16a0a", key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`),
   };
   if (a.userid) Object.assign(body, { userid: Number(a.userid), kguid: Number(a.userid), token: a.token });
   const d = await kg("/v2/personal_recommend", { body, router: "persnfm.service.kugou.com" });
@@ -1926,7 +1982,7 @@ async function mcloud(path, data) {
   const key = utf8(h.slice(0, 16)), iv = utf8(h.slice(16, 32));
   const clienttime = now();
   const params = {
-    clienttime, mid: mid(), key: md5(`${APP_ID}${CLOUD_KEY}${CLIENT_VER}${clienttime}`), clientver: CLIENT_VER, appid: APP_ID,
+    clienttime, mid: mid(), key: md5(`${APP()}${SALTP()}${VER()}${clienttime}`), clientver: VER(), appid: APP(),
     p: rsaPkcs1(JSON.stringify({ aes, uid: Number(a.userid), token: a.token })).toUpperCase(),
   };
   const qs = Object.keys(params).map((k) => `${k}=${encodeURIComponent(params[k])}`).join("&");

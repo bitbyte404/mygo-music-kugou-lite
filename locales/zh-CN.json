@@ -99,5 +99,9 @@
   "Male": "男歌手",
   "Female": "女歌手",
   "Groups": "组合",
-  "All artists": "全部歌手"
+  "All artists": "全部歌手",
+  "Protocol": "请求方式",
+  "Kugou Concept (default)": "酷狗概念版（默认）",
+  "Kugou Music": "酷狗音乐",
+  "Concept Edition (default) gets the daily free VIP. Kugou Music uses the VIP bought in the regular Kugou app.": "酷狗概念版（默认）可以每天领免费 VIP；酷狗音乐用你在酷狗音乐 App 里开通的 VIP。两种方式分别登录。"
 }
