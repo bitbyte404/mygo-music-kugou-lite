@@ -1870,7 +1870,7 @@ export async function postComment({ trackId, text }) {
   const d = await kg("/index.php", { bare: true, sign: false, params, body, router: "m.comment.service.kugou.com", headers: { "Content-Type": "application/json; charset=UTF-8" } });
   const me = store.get("account", {});
   return {
-    id: String(d.id || d.cmtid || d.cid || d.data?.id || ""),
+    id: String(d.addid || d.id || d.cmtid || d.data?.id || ""),
     author: String(me.name || ""), avatarUrl: me.imageUrl, text: content, time: Date.now(),
   };
 }
