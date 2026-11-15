@@ -14,7 +14,8 @@
       "krcs.kugou.com",
       "kugouvip.kugou.com",
       "userservice.kugou.com",
-      "mcloudservice.kugou.com"
+      "mcloudservice.kugou.com",
+      "listenservice.kugou.com"
     ]
   },
   "settings": [
