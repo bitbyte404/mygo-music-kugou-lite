@@ -118,6 +118,8 @@ function platformChanged() {
   const p = platformName();
   if (lastPlatform && lastPlatform !== p) {
     rightsKnown.clear();
+    rightsLoaded = false;
+    listCache.clear();
     likedRead = null;
     followRead = null;
     vipKnown = null;
@@ -532,7 +534,9 @@ export async function signIn() {
 }
 
 export function signOut() {
-  for (const k of ["auth", "account", "likedIndex", "myLists", "vipDay", "vipNote"]) store.del(k);
+  for (const k of ["auth", "account", "likedIndex", "myLists", "vipDay", "vipNote", "rights"]) store.del(k);
+  rightsKnown.clear();
+  listCache.clear();
 }
 
 export function account() {
@@ -601,6 +605,21 @@ const RIGHTS_CHUNK = 200;
 const RIGHTS_AT_ONCE = 6;
 const RIGHTS_TTL = 30 * 60 * 1000;
 const rightsKnown = new Map(); // "hash:album" -> { at, denied }
+// Kept across restarts too, so a long list greys out at once when reopened.
+let rightsLoaded = false;
+function loadRights() {
+  if (rightsLoaded) return;
+  rightsLoaded = true;
+  const fresh = Date.now() - RIGHTS_TTL;
+  for (const [k, v] of Object.entries(store.get("rights", {}))) {
+    if (Array.isArray(v) && v[0] > fresh && !rightsKnown.has(k)) rightsKnown.set(k, { at: v[0], denied: !!v[1] });
+  }
+}
+function saveRights() {
+  const fresh = Date.now() - RIGHTS_TTL;
+  const keep = [...rightsKnown].filter(([, v]) => v.at > fresh).slice(-3000);
+  store.set("rights", Object.fromEntries(keep.map(([k, v]) => [k, [v.at, v.denied ? 1 : 0]])));
+}
 
 const deniedRights = (row, vipOk = true) =>
   /^deny/i.test(String(row?._msg || "")) || (Number(row?.privilege) === 5 && Number(row?.status) === 0) ||
@@ -652,6 +671,7 @@ async function markUnavailableTracks(tracks) {
     else if (group.album === id.album) group.tracks.push(track);
     else group.album = null; // The same hash can appear in different album contexts.
   }
+  loadRights();
   const resource = [];
   const fresh = Date.now() - RIGHTS_TTL;
   for (const [hash, group] of groups) {
@@ -679,6 +699,7 @@ async function markUnavailableTracks(tracks) {
     if (denied) for (const track of groups.get(hash).tracks) track.unavailable = true;
   }
   if (rightsKnown.size > 20000) for (const k of [...rightsKnown.keys()].slice(0, 5000)) rightsKnown.delete(k);
+  saveRights();
   return tracks;
 }
 
@@ -1305,7 +1326,7 @@ async function fillOwnCovers(lists, out) {
   store.set("listCovers", next);
 }
 
-async function listTracks(listid, page = 1, pagesize = 300) {
+async function listTracks(listid, page = 1, pagesize = 300, probe = false) {
   const a = needSignIn();
   const body = { listid: Number(listid), userid: String(a.userid), type: 0, page, pagesize, area_code: 1, allplatform: 1, show_cover: 1, token: a.token };
   const d = await kg("/v4/get_list_all_file_v3", { body, router: "cloudlist.service.kugou.com" });
@@ -1320,7 +1341,7 @@ async function listTracks(listid, page = 1, pagesize = 300) {
     rows.push({ track: tr, fileid: Number(s.fileid || 0), sort: Number(s.sort ?? 0) });
     if (s.fileid) fileids[`${listid}:${tr.id}`] = s.fileid;
   }
-  remember("fileids", fileids);
+  if (!probe) remember("fileids", fileids);
   return { tracks, rows, total: Number(d.count || d.total || items.length), ver: Number(d.list_ver || 0) };
 }
 
@@ -1328,13 +1349,42 @@ async function listTracks(listid, page = 1, pagesize = 300) {
 // Kugou hands them out by fileid, the order they were added; its app shows
 // them by each song's sort, smallest first, which is newest first until the
 // listener moves songs about. withRows answers the fileids and list_ver too.
-async function allListTracks(listid, withRows) {
-  const first = await listTracks(listid, 1, 300);
-  const pages = Math.min(Math.ceil(first.total / 300), 20);
-  const rest = await Promise.all(Array.from({ length: Math.max(pages - 1, 0) }, (_, i) => listTracks(listid, i + 2, 300).then((r) => r.rows)));
-  const rows = [...first.rows, ...rest.flat()].sort((x, y) => x.sort - y.sort || y.fileid - x.fileid);
-  if (withRows) return { rows, ver: first.ver };
-  return rows.map((r) => r.track);
+// A list is kept while its list_ver stays the same: ver is the version the
+// caller already knows (from the list of lists), else one song is asked for
+// to learn it. A changed list is read again, every page at once.
+const listCache = new Map(); // "userid:listid" -> { ver, rows }
+async function allListTracks(listid, withRows, ver, count) {
+  const key = `${needSignIn().userid}:${listid}`;
+  const kept = listCache.get(key);
+  let total = Number(count) || 0;
+  if (ver === undefined || ver === null || ver === "") {
+    const probe = await listTracks(listid, 1, 1, true);
+    ver = probe.ver;
+    total = probe.total;
+  }
+  let rows, fresh;
+  if (kept && Number(ver) > 0 && kept.ver === Number(ver)) {
+    rows = kept.rows;
+  } else {
+    let read;
+    if (total) {
+      const pages = Math.min(Math.ceil(total / 300), 20);
+      read = await Promise.all(Array.from({ length: Math.max(pages, 1) }, (_, i) => listTracks(listid, i + 1, 300)));
+    } else {
+      const first = await listTracks(listid, 1, 300);
+      const pages = Math.min(Math.ceil(first.total / 300), 20);
+      read = [first, ...(await Promise.all(Array.from({ length: Math.max(pages - 1, 0) }, (_, i) => listTracks(listid, i + 2, 300))))];
+    }
+    rows = read.flatMap((r) => r.rows).sort((x, y) => x.sort - y.sort || y.fileid - x.fileid);
+    fresh = read[0].ver || Number(ver) || 0;
+    listCache.set(key, { ver: fresh, rows });
+    if (listCache.size > 50) listCache.delete(listCache.keys().next().value);
+  }
+  // Fresh copies, so greying of one read doesn't stick to the kept list.
+  const copy = rows.map((r) => ({ ...r, track: { ...r.track, unavailable: undefined } }));
+  for (const r of copy) delete r.track.unavailable;
+  if (withRows) return { rows: copy, ver: fresh ?? kept.ver };
+  return copy.map((r) => r.track);
 }
 
 // Moves a song of an own list from one place to another: Kugou takes the
@@ -1388,18 +1438,22 @@ export async function playlist({ id }) {
   return { ...toPlaylist({ ...info, global_collection_id: id }), saved, trackCount: tracks.length, tracks };
 }
 
-async function likedListId() {
+async function likedListInfo() {
   const lists = await myLists();
   const l = likedList(lists);
   if (!l) throw fail("unavailable", t("Couldn't find your 我喜欢 list"));
-  return l.listid;
+  return { listid: l.listid, ver: l.list_ver, count: l.count };
+}
+
+async function likedListId() {
+  return (await likedListInfo()).listid;
 }
 
 async function likedIndex(refresh) {
   let idx = store.get("likedIndex", null);
   if (!idx || refresh || Date.now() - idx.at > 10 * 60 * 1000) {
-    const listid = await likedListId();
-    const tracks = await allListTracks(listid);
+    const { listid, ver, count } = await likedListInfo();
+    const tracks = await allListTracks(listid, false, ver, count);
     idx = { at: Date.now(), listid, hashes: tracks.map((x) => parseId(x.id).hash) };
     store.set("likedIndex", idx);
   }
@@ -1414,8 +1468,8 @@ let likedRead = null;
 export async function liked({ offset = 0 }) {
   needSignIn();
   if (offset === 0 || !likedRead || Date.now() - likedRead.at > 10 * 60 * 1000) {
-    const listid = await likedListId();
-    const tracks = await allListTracks(listid);
+    const { listid, ver, count } = await likedListInfo();
+    const tracks = await allListTracks(listid, false, ver, count);
     await markUnavailableTracks(tracks);
     likedRead = { at: Date.now(), tracks };
     store.set("likedIndex", { at: Date.now(), listid, hashes: tracks.map((x) => parseId(x.id).hash) });
@@ -1445,8 +1499,9 @@ async function removeSongs(listid, trackIds) {
   const a = needSignIn();
   let map = store.get("fileids", {});
   if (trackIds.some((i) => !map[`${listid}:${i}`])) {
-    await allListTracks(listid);
-    map = store.get("fileids", {});
+    const { rows } = await allListTracks(listid, true);
+    map = { ...map };
+    for (const r of rows) if (r.fileid) map[`${listid}:${r.track.id}`] = r.fileid;
   }
   // Match by hash too, as the same song can come with another mixsongid.
   const byHash = {};
