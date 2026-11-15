@@ -155,7 +155,16 @@ const list = (...xs) => {
   for (const x of xs) if (Array.isArray(x)) return x;
   return [];
 };
-const img = (u, size = 400) => (u ? String(u).replace("{size}", size).replace("/stdmusic/240/", "/stdmusic/400/").replace(/^http:/, "https:") : undefined);
+// Kugou's image servers make a picture any size asked, by a number in its
+// path (/stdmusic/240/, /custom/150/, /softhead/100/, ...) or {size} there.
+// The app fills in {size} with the pixels it shows the picture at (0.1.20
+// and on), so every such path gets {size}; anything else stays as it came.
+const SIZED = /^(https?:\/\/(?:[\w-]+\.)*(?:kugou\.com|kgimg\.com)\/(?:stdmusic|mcommon|kugouicon|custom|uploadpic\/softhead)\/)(?:\d+|\{size\})\//;
+const img = (u) => {
+  if (!u) return undefined;
+  const s = String(u).replace(/^http:/, "https:");
+  return SIZED.test(s) ? s.replace(SIZED, "$1{size}/") : s;
+};
 
 // ---------- AES-128-CBC and RSA, for registering the device ----------
 // Kugou only plays to a device it has registered, and registering is
@@ -177,28 +186,34 @@ const INV = new Uint8Array(256);
 const xt = (a) => ((a << 1) ^ (a & 0x80 ? 0x1b : 0)) & 0xff;
 const mul = (a, b) => { let r = 0; while (b) { if (b & 1) r ^= a; a = xt(a); b >>= 1; } return r; };
 
+// AES key schedule for a 16- or 32-byte key (AES-128 or AES-256): the
+// follow service encrypts with a 32-character key, the rest with 16.
 function expandKey(key) {
-  const w = new Uint8Array(176);
+  const nk = key.length / 4, rounds = nk + 6;
+  const w = new Uint8Array(16 * (rounds + 1));
   w.set(key);
   let rcon = 1;
-  for (let i = 16; i < 176; i += 4) {
+  for (let i = key.length; i < w.length; i += 4) {
     let t = w.slice(i - 4, i);
-    if (i % 16 === 0) {
+    if (i % key.length === 0) {
       t = new Uint8Array([SBOX[t[1]] ^ rcon, SBOX[t[2]], SBOX[t[3]], SBOX[t[0]]]);
       rcon = xt(rcon);
+    } else if (nk > 6 && i % key.length === 16) {
+      t = t.map((b) => SBOX[b]);
     }
-    for (let j = 0; j < 4; j++) w[i + j] = w[i - 16 + j] ^ t[j];
+    for (let j = 0; j < 4; j++) w[i + j] = w[i - key.length + j] ^ t[j];
   }
   return w;
 }
 
 function encBlock(s, w) {
+  const n = w.length / 16 - 1;
   for (let i = 0; i < 16; i++) s[i] ^= w[i];
-  for (let r = 1; r <= 10; r++) {
+  for (let r = 1; r <= n; r++) {
     for (let i = 0; i < 16; i++) s[i] = SBOX[s[i]];
     const t = s.slice();
     for (let c = 0; c < 4; c++) for (let row = 0; row < 4; row++) s[c * 4 + row] = t[((c + row) % 4) * 4 + row];
-    if (r < 10) for (let c = 0; c < 4; c++) {
+    if (r < n) for (let c = 0; c < 4; c++) {
       const [a0, a1, a2, a3] = s.slice(c * 4, c * 4 + 4);
       s[c * 4] = xt(a0) ^ xt(a1) ^ a1 ^ a2 ^ a3;
       s[c * 4 + 1] = a0 ^ xt(a1) ^ xt(a2) ^ a2 ^ a3;
@@ -210,8 +225,9 @@ function encBlock(s, w) {
 }
 
 function decBlock(s, w) {
-  for (let i = 0; i < 16; i++) s[i] ^= w[160 + i];
-  for (let r = 9; r >= 0; r--) {
+  const n = w.length / 16 - 1;
+  for (let i = 0; i < 16; i++) s[i] ^= w[n * 16 + i];
+  for (let r = n - 1; r >= 0; r--) {
     const t = s.slice();
     for (let c = 0; c < 4; c++) for (let row = 0; row < 4; row++) s[((c + row) % 4) * 4 + row] = t[c * 4 + row];
     for (let i = 0; i < 16; i++) s[i] = INV[s[i]];
@@ -275,6 +291,26 @@ function rsaPkcs1(text) {
   let x = 0n;
   for (const b of block) x = (x << 8n) | BigInt(b);
   return modpow(x, 65537n, RSA_N).toString(16).padStart(256, "0");
+}
+
+// The same key without padding, as the follow list wants it: the text
+// left-aligned in the block and zeros after it.
+function rsaRaw(text) {
+  const m = utf8(text);
+  let x = 0n;
+  for (let i = 0; i < 128; i++) x = (x << 8n) | BigInt(m[i] || 0);
+  return modpow(x, 65537n, RSA_N).toString(16).padStart(256, "0");
+}
+
+// The follow service's encryption: JSON AES-256-CBC with md5 of a random
+// 16-letter key (iv its last 16 characters), in hex, and that key sent RSA
+// encrypted with the time.
+function followCrypt(data, clienttime) {
+  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
+  const temp = Array.from({ length: 16 }, () => chars[Math.floor(Math.random() * 36)]).join("");
+  const k = md5(temp);
+  const str = hexOf(cbcEncrypt(utf8(JSON.stringify(data)), utf8(k), utf8(k.slice(16))));
+  return { str, p: rsaPkcs1(JSON.stringify({ clienttime, key: temp })) };
 }
 
 // Registers this device with Kugou, for the dfid it then plays to.
@@ -688,9 +724,17 @@ export async function browse({ page }) {
     if (note) lines.push(note);
     sections.push({ title: t("Recently played"), tracks: (await recent().catch(() => [])).slice(0, 20), empty: t("Nothing yet") });
     sections.push({ title: t("My playlists"), playlists: await playlists().catch(() => []) });
-    sections.push({ links: [{ title: t("Claim today's VIP again"), subtitle: t("Concept Edition's free daily VIP"), page: "vip" }] });
+    sections.push({
+      links: [
+        { title: t("Followed artists"), subtitle: t("The artists you follow"), page: "following" },
+        { title: t("Claim today's VIP again"), subtitle: t("Concept Edition's free daily VIP"), page: "vip" },
+      ],
+    });
     const me = store.get("account", {});
     return { title: me.name || a.userid, imageUrl: me.imageUrl, description: lines.join("\n") || undefined, sections };
+  }
+  if (page === "following") {
+    return { title: t("Followed artists"), sections: [{ artists: await followedArtists(true), empty: t("You don't follow any artists yet") }] };
   }
   if (page === "vip") {
     needSignIn();
@@ -782,22 +826,42 @@ async function listTracks(listid, page = 1, pagesize = 300) {
   const items = list(d.songs, d.info, d.list);
   const fileids = {};
   const tracks = [];
+  const rows = [];
   for (const s of items) {
     const tr = toTrack(s);
     if (!tr) continue;
     tracks.push(tr);
+    rows.push({ track: tr, fileid: Number(s.fileid || 0), sort: Number(s.sort ?? 0) });
     if (s.fileid) fileids[`${listid}:${tr.id}`] = s.fileid;
   }
   remember("fileids", fileids);
-  return { tracks, total: Number(d.count || d.total || items.length) };
+  return { tracks, rows, total: Number(d.count || d.total || items.length), ver: Number(d.list_ver || 0) };
 }
 
 // Every song of an own list, 300 a page, which is the most Kugou gives at once.
-async function allListTracks(listid) {
+// Kugou hands them out by fileid, the order they were added; its app shows
+// them by each song's sort, smallest first, which is newest first until the
+// listener moves songs about. withRows answers the fileids and list_ver too.
+async function allListTracks(listid, withRows) {
   const first = await listTracks(listid, 1, 300);
   const pages = Math.min(Math.ceil(first.total / 300), 20);
-  const rest = await Promise.all(Array.from({ length: Math.max(pages - 1, 0) }, (_, i) => listTracks(listid, i + 2, 300).then((r) => r.tracks)));
-  return [...first.tracks, ...rest.flat()];
+  const rest = await Promise.all(Array.from({ length: Math.max(pages - 1, 0) }, (_, i) => listTracks(listid, i + 2, 300).then((r) => r.rows)));
+  const rows = [...first.rows, ...rest.flat()].sort((x, y) => x.sort - y.sort || y.fileid - x.fileid);
+  if (withRows) return { rows, ver: first.ver };
+  return rows.map((r) => r.track);
+}
+
+// Moves a song of an own list from one place to another: Kugou takes the
+// whole new order as each song's sort, with the list's version.
+export async function movePlaylistTrack({ id, from, to }) {
+  if (!String(id).startsWith("u")) throw fail("unsupported");
+  const listid = Number(String(id).slice(1));
+  const { rows, ver } = await allListTracks(listid, true);
+  if (from < 0 || from >= rows.length || to < 0 || to >= rows.length) throw new Error(t("That song isn't in this playlist anymore"));
+  rows.splice(to, 0, rows.splice(from, 1)[0]);
+  const data = rows.map((r, i) => ({ fileid: r.fileid, sort: i }));
+  await cloud("/v1/modify_song_sort", { listid, list_ver: ver, type: 0, data });
+  likedRead = null;
 }
 
 async function publicTracks(gid) {
@@ -854,7 +918,7 @@ async function likedIndex(refresh) {
   return idx;
 }
 
-// Kugou gives a list oldest first; 我喜欢 reads newest first, as in Kugou's app.
+// 我喜欢 reads in the app's order (newest first unless the listener moved songs).
 // The whole list is read once when its first page is asked for, and the
 // pages after it come from that read.
 let likedRead = null;
@@ -863,7 +927,7 @@ export async function liked({ offset = 0 }) {
   needSignIn();
   if (offset === 0 || !likedRead || Date.now() - likedRead.at > 10 * 60 * 1000) {
     const listid = await likedListId();
-    const tracks = (await allListTracks(listid)).reverse();
+    const tracks = await allListTracks(listid);
     likedRead = { at: Date.now(), tracks };
     store.set("likedIndex", { at: Date.now(), listid, hashes: tracks.map((x) => parseId(x.id).hash) });
   }
@@ -1157,7 +1221,40 @@ export async function artist({ id }) {
   ]);
   const a = toArtist(Array.isArray(detail) ? detail[0] : detail);
   a.id = String(id);
+  if (signedIn()) a.following = (await followedArtists(false).catch(() => [])).some((x) => x.id === a.id);
   return { artist: a, tracks: tracksOf(list(songs, songs.info, songs.list)), albums };
+}
+
+// ---------- followed artists ----------
+
+// The artists the listener follows, newest first. Kept for ten minutes, so
+// artist pages can say whether they're followed without asking each time.
+let followRead = null;
+async function followedArtists(refresh) {
+  const a = needSignIn();
+  if (!refresh && followRead && followRead.user === a.userid && Date.now() - followRead.at < 10 * 60 * 1000) return followRead.artists;
+  const body = {
+    merge: 2, need_iden_type: 1, ext_params: "k_pic,jumptype,singerid,score", userid: Number(a.userid), type: 0, id_type: 0,
+    p: rsaRaw(JSON.stringify({ clienttime: now(), token: a.token })).toUpperCase(),
+  };
+  const d = await kg("/v4/follow_list", { body, params: { plat: 1 }, router: "relationuser.kugou.com" });
+  // The list also holds people who aren't artists; those have no singerid.
+  const artists = list(d.lists, d.list, d.info)
+    .filter((r) => Number(r.singerid) > 0)
+    .map((r) => ({ id: String(r.singerid), name: String(r.nickname || ""), imageUrl: img(r.pic), following: true }));
+  followRead = { at: Date.now(), user: a.userid, artists };
+  return artists;
+}
+
+export async function followArtist({ id, on }) {
+  const a = needSignIn();
+  const singerid = Number(String(id).replace(/^name:/, ""));
+  if (!singerid) throw fail("unsupported", t("Kugou can't follow this artist"));
+  const clienttime = now();
+  const enc = followCrypt({ singerid, token: a.token }, clienttime);
+  const body = { plat: 0, userid: Number(a.userid), singerid, source: 7, p: enc.p, params: enc.str };
+  await kg(on ? "/followservice/v3/follow_singer" : "/followservice/v3/unfollow_singer", { body, params: { clienttime } });
+  followRead = null;
 }
 
 // ---------- playback ----------
@@ -1291,7 +1388,7 @@ export async function comments({ trackId, offset = 0 }) {
   const page = Math.floor(offset / PAGE) + 1;
   const d = await kg("/mcomment/v1/cmtlist", {
     method: "POST",
-    params: { ver: 6, mixsongid: p.mix, need_show_image: 1, p: page, pagesize: PAGE, show_classify: 1, show_hotword_list: 1, extdata: "0", code: "fc4be23b4e972707f36b8a828a93ba8a" },
+    params: { ver: 6, mixsongid: p.mix, need_show_image: 1, p: page, pagesize: PAGE, show_classify: 1, show_hotword_list: 1, extdata: "0", code: COMMENT_CODE },
   });
   const raw = list(d.list, d.comments, d.weightList);
   const total = Number(d.count || d.combine_count || 0);
@@ -1304,6 +1401,57 @@ export async function comments({ trackId, offset = 0 }) {
     total: total || undefined,
     more: total ? page * PAGE < total : raw.length >= PAGE,
   };
+}
+
+// Posting goes to the comment service itself, by the song's comment id
+// (childrenid), which the comment list answers for its mixsongid.
+const COMMENT_CODE = "fc4be23b4e972707f36b8a828a93ba8a";
+
+async function commentTarget(mix) {
+  const d = await kg("/mcomment/v1/cmtlist", {
+    method: "POST",
+    params: { ver: 6, mixsongid: mix, need_show_image: 1, p: 1, pagesize: 1, show_classify: 1, show_hotword_list: 1, extdata: "0", code: COMMENT_CODE },
+  });
+  const first = list(d.list)[0] || {};
+  const id = String(d.childrenid || first.special_child_id || "");
+  if (!id || id === "0") throw fail("unavailable", t("Kugou has no comments for this song"));
+  return { id, name: String(first.special_child_name || first.song_show_text || NAMES.get(first.hash) || "") };
+}
+
+// The comment service's query: the account, unsigned, with a key of the
+// time and mid (and the body, for a post) salted as the Concept app does.
+function commentQuery(extra, keyTail) {
+  const a = needSignIn();
+  const clienttime = now();
+  return {
+    ...extra, kugouid: a.userid, ver: 6, clienttoken: a.token, appid: APP_ID, clientver: CLIENT_VER, mid: mid(), clienttime,
+    key: md5(`${APP_ID}${SALT}${CLIENT_VER}${clienttime}${mid()}${keyTail || ""}`), uuid: "-", dfid: dfid(),
+  };
+}
+
+export async function postComment({ trackId, text }) {
+  const p = parseId(trackId);
+  const content = String(text || "").trim();
+  if (!p.mix) throw fail("unsupported");
+  if (!content) throw new Error(t("Write something first"));
+  const target = await commentTarget(p.mix);
+  const body = JSON.stringify({ data: { content, album_audio_id: p.mix, images: [] } });
+  const params = commentQuery({ r: "commentsv3/add", code: COMMENT_CODE, childrenid: target.id, childrenname: target.name || undefined }, body);
+  if (!params.childrenname) delete params.childrenname;
+  const d = await kg("/index.php", { bare: true, sign: false, params, body, router: "m.comment.service.kugou.com", headers: { "Content-Type": "application/json; charset=UTF-8" } });
+  const me = store.get("account", {});
+  return {
+    id: String(d.id || d.cmtid || d.cid || d.data?.id || ""),
+    author: String(me.name || ""), avatarUrl: me.imageUrl, text: content, time: Date.now(),
+  };
+}
+
+// Takes one of the listener's own comments down again. Not an export the app
+// calls: it is here so a test can undo a post.
+async function deleteComment({ trackId, commentId }) {
+  const target = await commentTarget(parseId(trackId).mix);
+  const params = commentQuery({ r: "commentsv2/delcomment", code: COMMENT_CODE, childrenid: target.id, cid: commentId });
+  return kg("/index.php", { bare: true, sign: false, params, router: "m.comment.service.kugou.com" });
 }
 
 // ---------- private FM ----------
