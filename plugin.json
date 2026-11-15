@@ -38,7 +38,18 @@
     {
       "key": "autoVip",
       "label": "Daily free VIP",
-      "help": "Claims the Concept Edition's free VIP once a day while signed in. Enter 0 to turn it off."
+      "type": "select",
+      "help": "Claims the Concept Edition's free VIP once a day while signed in.",
+      "options": [
+        {
+          "value": "",
+          "label": "On (default)"
+        },
+        {
+          "value": "0",
+          "label": "Off"
+        }
+      ]
     }
   ],
   "navigation": [

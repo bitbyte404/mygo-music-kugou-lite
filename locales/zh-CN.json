@@ -103,5 +103,8 @@
   "Protocol": "请求方式",
   "Kugou Concept (default)": "酷狗概念版（默认）",
   "Kugou Music": "酷狗音乐",
-  "Concept Edition (default) gets the daily free VIP. Kugou Music uses the VIP bought in the regular Kugou app.": "酷狗概念版（默认）可以每天领免费 VIP；酷狗音乐用你在酷狗音乐 App 里开通的 VIP。两种方式分别登录。"
+  "Concept Edition (default) gets the daily free VIP. Kugou Music uses the VIP bought in the regular Kugou app.": "酷狗概念版（默认）可以每天领免费 VIP；酷狗音乐用你在酷狗音乐 App 里开通的 VIP。两种方式分别登录。",
+  "Claims the Concept Edition's free VIP once a day while signed in.": "登录后每天自动领一次酷狗概念版免费 VIP（仅概念版）。",
+  "On (default)": "开（默认）",
+  "Off": "关"
 }
