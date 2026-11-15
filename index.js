@@ -546,54 +546,85 @@ async function claimVip(force) {
 
 const SEARCH = { tracks: "song", albums: "album", artists: "author", playlists: "special" };
 const ENTITLEMENT_QUALITIES = ["128", "320", "flac", "high", "viper_atmos", "viper_tape", "viper_clear", "super", "multitrack"];
-const QUALITY_BY_LEVEL = { 1: "128", 2: "128", 4: "320", 5: "flac", 6: "high" };
+
+// Greys out what this account can't play, by what Kugou's rights service says
+// of each song. A song it denies (privilege 5, "Deny: ..." for its region,
+// app or behavior, or not published) doesn't play; a VIP song (privilege 10)
+// plays with the Concept Edition's VIP, so it is left as it is. Checked
+// against real plays of every song of a signed-in account's 我喜欢: the
+// denied ones are the ones that fail. Asked 200 songs a request, six
+// requests at once, and kept half an hour.
+const RIGHTS_CHUNK = 200;
+const RIGHTS_AT_ONCE = 6;
+const RIGHTS_TTL = 30 * 60 * 1000;
+const rightsKnown = new Map(); // "hash:album" -> { at, denied }
+
+const deniedRights = (row) => /^deny/i.test(String(row?._msg || "")) || (Number(row?.privilege) === 5 && Number(row?.status) === 0);
+
+async function rightsOf(resource) {
+  const byHash = new Map();
+  const chunks = [];
+  for (let i = 0; i < resource.length; i += RIGHTS_CHUNK) chunks.push(resource.slice(i, i + RIGHTS_CHUNK));
+  for (let i = 0; i < chunks.length; i += RIGHTS_AT_ONCE) {
+    const answers = await Promise.all(chunks.slice(i, i + RIGHTS_AT_ONCE).map((chunk) =>
+      kg("/v2/get_res_privilege/lite", {
+        router: "media.store.kugou.com",
+        body: { appid: APP_ID, area_code: 1, behavior: "play", clientver: CLIENT_VER,
+          need_hash_offset: 1, relate: 1, support_verify: 1, resource: chunk, qualities: ENTITLEMENT_QUALITIES },
+      }).catch(() => [])));
+    for (const row of answers.flatMap((d) => list(d))) {
+      const hash = String(row?.hash || "").toLowerCase();
+      if (hash) byHash.set(hash, byHash.has(hash) ? null : row);
+    }
+  }
+  return byHash;
+}
 
 async function markUnavailableTracks(tracks) {
-  if (!signedIn()) return tracks;
+  if (!signedIn() || !tracks?.length) return tracks;
 
   const groups = new Map();
   for (const track of tracks) {
     const id = parseId(track.id);
     const hash = id.hash.toLowerCase();
-    if (!/^[0-9a-f]{32}$/.test(hash)) continue;
+    if (!/^[0-9a-f]{32}$/.test(hash) || String(track.id).endsWith(CLOUD_TAG)) continue;
     const group = groups.get(hash);
     if (!group) groups.set(hash, { album: id.album, tracks: [track] });
     else if (group.album === id.album) group.tracks.push(track);
     else group.album = null; // The same hash can appear in different album contexts.
   }
   const resource = [];
+  const fresh = Date.now() - RIGHTS_TTL;
   for (const [hash, group] of groups) {
-    if (group.album !== null) resource.push({ type: "audio", page_id: 0, hash, album_id: group.album });
+    if (group.album === null) continue;
+    const known = rightsKnown.get(`${hash}:${group.album}`);
+    if (known && known.at > fresh) {
+      if (known.denied) for (const track of group.tracks) track.unavailable = true;
+    } else resource.push({ type: "audio", page_id: 0, hash, album_id: group.album });
   }
   if (!resource.length) return tracks;
 
-  let response;
+  let byHash;
   try {
-    response = await kg("/v2/get_res_privilege/lite", {
-      router: "media.store.kugou.com",
-      body: { appid: APP_ID, area_code: 1, behavior: "play", clientver: CLIENT_VER,
-        need_hash_offset: 1, relate: 1, support_verify: 1, resource, qualities: ENTITLEMENT_QUALITIES },
-    });
+    byHash = await rightsOf(resource);
   } catch {
     return tracks; // Rights are unknown when the extra request fails.
   }
-
-  const byHash = new Map();
-  for (const row of list(response)) {
-    const hash = String(row?.hash || "").toLowerCase();
-    if (hash) byHash.set(hash, byHash.has(hash) ? null : row);
-  }
+  const at = Date.now();
   for (const { hash, album_id: album } of resource) {
     const row = byHash.get(hash);
     if (!row || (album && Number(row.album_id) && Number(row.album_id) !== album)) continue;
-    const goods = list(row.relate_goods).filter(Boolean);
-    const denied = QUALITY.lossless.every((quality) => {
-      const variants = goods.filter((item) => String(item.quality ?? QUALITY_BY_LEVEL[item.level]) === quality);
-      return variants.length > 0 && variants.every(({ status }) => status === 0 || status === "0");
-    });
+    const denied = deniedRights(row);
+    rightsKnown.set(`${hash}:${album}`, { at, denied });
     if (denied) for (const track of groups.get(hash).tracks) track.unavailable = true;
   }
+  if (rightsKnown.size > 20000) for (const k of [...rightsKnown.keys()].slice(0, 5000)) rightsKnown.delete(k);
   return tracks;
+}
+
+// Every track of a page's sections, greyed out in one go.
+async function markSections(sections) {
+  await markUnavailableTracks(list(sections).flatMap((s) => list(s.tracks)));
 }
 
 export async function search({ query, kind, offset = 0 }) {
@@ -691,10 +722,17 @@ export async function home() {
       { title: t("Audiobooks"), subtitle: t("Novels, talks and radio dramas"), page: "audiobooks" },
     ],
   });
+  await markSections(sections);
   return { title: t("Kugou Concept"), subtitle: vip || undefined, sections };
 }
 
 export async function browse({ page }) {
+  const b = await browsePage(page);
+  await markSections(b.sections);
+  return b;
+}
+
+async function browsePage(page) {
   if (page === "daily") return { title: t("Daily picks"), sections: [{ tracks: await dailyTracks(), empty: t("Nothing today") }] };
   if (page === "new") return { title: t("New songs"), sections: [{ tracks: await newSongs() }] };
   if (page === "fm") return { title: t("Private FM"), sections: [{ stations: await stations() }] };
@@ -1281,10 +1319,12 @@ export async function playlist({ id }) {
     const tracks = await allListTracks(listid);
     // Kugou leaves pic empty on lists without a custom cover; its app shows the first song's cover then.
     const imageUrl = img(meta.pic) || tracks.find((x) => x.album?.imageUrl)?.album.imageUrl;
+    await markUnavailableTracks(tracks);
     return { id, name: meta.name || t("Playlist"), imageUrl, description: meta.intro || undefined, mine: true, trackCount: tracks.length, tracks };
   }
   const [info, tracks] = await Promise.all([playlistInfo(id).catch(() => ({})), publicTracks(id)]);
   const saved = store.get("myLists", []).some((l) => (l.gid === id || l.cgid === id) && !l.mine);
+  await markUnavailableTracks(tracks);
   return { ...toPlaylist({ ...info, global_collection_id: id }), saved, trackCount: tracks.length, tracks };
 }
 
@@ -1316,6 +1356,7 @@ export async function liked({ offset = 0 }) {
   if (offset === 0 || !likedRead || Date.now() - likedRead.at > 10 * 60 * 1000) {
     const listid = await likedListId();
     const tracks = await allListTracks(listid);
+    await markUnavailableTracks(tracks);
     likedRead = { at: Date.now(), tracks };
     store.set("likedIndex", { at: Date.now(), listid, hashes: tracks.map((x) => parseId(x.id).hash) });
   }
@@ -1423,7 +1464,7 @@ export async function recent() {
     bp = d.bp;
   }
   const rows = [...seen.values()].sort((x, y) => y.at - x.at);
-  return tracksOf(rows.map((r) => r.s.info || r.s));
+  return markUnavailableTracks(tracksOf(rows.map((r) => r.s.info || r.s)));
 }
 
 // ---------- cloud playlists: Kugou's encrypted cloudlist protocol ----------
@@ -1582,7 +1623,7 @@ export async function album({ id }) {
   }
   if (!al.name && tracks[0]) al.name = tracks[0].album.name;
   if (!al.imageUrl && tracks[0]) al.imageUrl = tracks[0].album.imageUrl;
-  return { album: al, tracks };
+  return { album: al, tracks: await markUnavailableTracks(tracks) };
 }
 
 async function artistAlbums(id, size = 30) {
@@ -1610,7 +1651,7 @@ export async function artist({ id }) {
   const a = toArtist(Array.isArray(detail) ? detail[0] : detail);
   a.id = String(id);
   if (signedIn()) a.following = (await followedArtists(false).catch(() => [])).some((x) => x.id === a.id);
-  return { artist: a, tracks: tracksOf(list(songs, songs.info, songs.list)), albums };
+  return { artist: a, tracks: await markUnavailableTracks(tracksOf(list(songs, songs.info, songs.list))), albums };
 }
 
 // ---------- followed artists ----------
@@ -1863,7 +1904,7 @@ export async function stationNext({ id }) {
   };
   if (a.userid) Object.assign(body, { userid: Number(a.userid), kguid: Number(a.userid), token: a.token });
   const d = await kg("/v2/personal_recommend", { body, router: "persnfm.service.kugou.com" });
-  return tracksOf(list(d.song_list, d.songs, d.list));
+  return markUnavailableTracks(tracksOf(list(d.song_list, d.songs, d.list)));
 }
 
 // ---------- 音乐云盘: the songs the listener uploaded to Kugou ----------
