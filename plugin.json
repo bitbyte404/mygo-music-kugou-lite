@@ -39,6 +39,11 @@
       "icon": "chart"
     },
     {
+      "title": "Audiobooks",
+      "page": "audiobooks",
+      "icon": "podcast"
+    },
+    {
       "title": "Private FM",
       "builtin": "stations"
     },

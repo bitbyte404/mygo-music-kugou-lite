@@ -148,7 +148,7 @@ async function kg(path, opts = {}) {
     e.kgCode = code;
     throw e;
   }
-  return json.data ?? json;
+  return opts.whole ? json : json.data ?? json;
 }
 
 const list = (...xs) => {
@@ -597,6 +597,7 @@ async function markUnavailableTracks(tracks) {
 }
 
 export async function search({ query, kind, offset = 0 }) {
+  if (kind === "shows") return searchShows(query, offset);
   const type = SEARCH[kind];
   if (!type) throw fail("unsupported");
   const size = type === "album" ? 20 : PAGE;
@@ -686,6 +687,7 @@ export async function home() {
     links: [
       { title: t("Charts"), subtitle: t("Kugou's charts"), page: "charts" },
       { title: t("Private FM"), subtitle: t("Endless songs picked for you"), page: "fm" },
+      { title: t("Audiobooks"), subtitle: t("Novels, talks and radio dramas"), page: "audiobooks" },
     ],
   });
   return { title: t("Kugou Concept"), subtitle: vip || undefined, sections };
@@ -733,6 +735,8 @@ export async function browse({ page }) {
     const me = store.get("account", {});
     return { title: me.name || a.userid, imageUrl: me.imageUrl, description: lines.join("\n") || undefined, sections };
   }
+  if (page === "audiobooks") return audiobooksPage();
+  if (page.startsWith("books:")) return audiobookTagPage(page.slice(6));
   if (page === "following") {
     return { title: t("Followed artists"), sections: [{ artists: await followedArtists(true), empty: t("You don't follow any artists yet") }] };
   }
@@ -751,6 +755,144 @@ export async function browse({ page }) {
     return { title: t("Albums"), sections: [{ albums: await artistAlbums(id, 100) }] };
   }
   throw fail("unavailable", "no such page");
+}
+
+// ---------- long audio: audiobooks and radio shows ----------
+
+// Kugou keeps audiobooks as albums of their own (category 2) with episodes
+// for songs, which play through the same song url as any song.
+
+function toShow(r = {}) {
+  return {
+    id: String(r.album_id ?? r.albumid ?? ""),
+    name: String(r.album_name ?? r.albumname ?? "").replace(/<\/?em>/g, ""),
+    imageUrl: img(r.sizable_cover_source || r.sizable_cover || r.img || r.cover),
+    description: String(r.intro || r.mix_intro || "").trim() || undefined,
+    publisher: String(r.author_name || (Array.isArray(r.authors) ? r.authors.map((a) => a.author_name).filter(Boolean).join("、") : "") || "") || undefined,
+    episodeCount: Number(r.audio_total || 0) || undefined,
+  };
+}
+const showsOf = (xs) => list(xs).map(toShow).filter((x) => x.id && x.name);
+
+async function showDetails(ids) {
+  if (!ids.length) return [];
+  const d = await kg("/openapi/v2/broadcast", {
+    body: {
+      data: ids.map((album_id) => ({ album_id: String(album_id) })), show_album_tag: 1,
+      fields: "album_name,album_id,category,authors,sizable_cover,intro,author_name,trans_param,album_tag,mix_intro,full_intro,is_publish",
+    },
+    headers: { "KG-TID": "78" },
+  });
+  return list(d, d.info, d.list).filter((r) => r && r.album_id && String(r.category ?? "2") === "2");
+}
+
+async function showEpisodes(id, page) {
+  const d = await kg("/longaudio/v2/album_audios", {
+    body: { album_id: String(id), area_code: 1, tagid: 0, page, pagesize: PAGE }, router: "openapi.kugou.com", headers: { "KG-TID": "78" }, whole: true,
+  });
+  const episodes = list(d.data, d.data?.list).map((r) => {
+    const tr = toTrack(r);
+    if (!tr) return null;
+    tr.showId = String(id);
+    const day = String(r.publish_date || r.publish_time || "").slice(0, 10);
+    if (day && day !== "0000-00-00") tr.published = day;
+    return tr;
+  }).filter(Boolean);
+  return { episodes, total: Number(d.total || 0) };
+}
+
+export async function show({ id, offset = 0 }) {
+  const page = Math.floor(offset / PAGE) + 1;
+  const [detail, eps] = await Promise.all([showDetails([id]).catch(() => []), showEpisodes(id, page)]);
+  const sh = toShow(detail[0] || { album_id: id, album_name: eps.episodes[0]?.album.name });
+  sh.id = String(id);
+  if (!sh.imageUrl) sh.imageUrl = eps.episodes[0]?.album.imageUrl;
+  if (eps.total) sh.episodeCount = eps.total;
+  for (const e of eps.episodes) if (!e.album.imageUrl) e.album.imageUrl = sh.imageUrl;
+  return { show: sh, episodes: await markUnavailableTracks(eps.episodes), more: eps.total ? page * PAGE < eps.total : eps.episodes.length >= PAGE };
+}
+
+// Kugou has no search of audiobooks as such: its long audio search answers
+// episodes, which are gathered here into the books they belong to. One book's
+// episodes can fill page after page, so four pages are read at once, and a
+// read that finds no new book ends the search.
+const showSearches = new Map();
+async function searchShows(query, offset) {
+  let s = showSearches.get(query);
+  if (!s || offset === 0) {
+    s = { page: 0, ids: [], shows: [], done: false };
+    showSearches.set(query, s);
+    if (showSearches.size > 20) showSearches.delete(showSearches.keys().next().value);
+  }
+  const a = auth();
+  const episodes = (page) =>
+    kg("/complexsearch/v4/search/song", {
+      params: {
+        area_code: 1, albumhide: 1, com_user_type: 0, privilegefilter: 0, dopicfull: 1, filter: 12, platform: "AndroidFilter", tag: "em", recver: 2,
+        iscorrection: 1, search_ability: 223, sec_aggre: 1, sec_aggre_bitmap: 0, mode_ability: 1, nocollect: 1, user_type: 0,
+        userid: a.userid || "0", keyword: query, page, pagesize: PAGE, clientver: 20789,
+      },
+    }).catch(() => ({}));
+  for (let round = 0; s.shows.length < offset + 10 && !s.done && round < 2; round++) {
+    const pages = await Promise.all([1, 2, 3, 4].map((i) => episodes(s.page + i)));
+    s.page += 4;
+    const items = pages.flatMap((d) => list(d.lists, d.list));
+    const total = Number(pages[0].total || 0);
+    const fresh = [...new Set(items.map((x) => String(x.AlbumID || x.album_id || "")).filter((x) => x && x !== "0" && !s.ids.includes(x)))];
+    s.ids.push(...fresh);
+    const found = await showDetails(fresh).catch(() => []);
+    const byId = new Map(found.map((r) => [String(r.album_id), r]));
+    const shows = fresh.filter((x) => byId.has(x)).map((x) => toShow(byId.get(x)));
+    s.shows.push(...shows);
+    if (!shows.length || pages.some((d) => list(d.lists, d.list).length < PAGE) || s.page * PAGE >= total) s.done = true;
+  }
+  return { shows: s.shows.slice(offset), more: !s.done };
+}
+
+// The audiobook front page: what Kugou recommends today, this week's new
+// books, its charts, and its categories, each opening a page of books.
+async function audiobooksPage() {
+  const [daily, week, vip, rank, tags] = await Promise.all([
+    kg("/longaudio/v1/home_new/daily_recommend", { method: "POST", params: { module_id: 1, size: PAGE, page: 1 } }).catch(() => ({})),
+    kg("/longaudio/v1/home_new/week_new_albums_recommend", { body: { album_playlist: [] }, params: { clientver: 12329 } }).catch(() => ({})),
+    kg("/longaudio/v1/home_new/vip_select_recommend", { body: { album_playlist: [] }, params: { position: "2", clientver: 12329 } }).catch(() => ({})),
+    kg("/longaudio/v1/home_new/rank_card_recommend", { params: { platform: "ios" } }).catch(() => []),
+    audiobookTags().catch(() => []),
+  ]);
+  const sections = [];
+  const add = (title, shows) => shows.length && sections.push({ title, shows });
+  add(t("Picked for you today"), showsOf(daily.albums));
+  add(String(week.title || t("New this week")), showsOf(week.list));
+  for (const r of list(rank)) add(String(r.rank_name || t("Charts")), showsOf(r.albums));
+  add(String(vip.title || t("VIP picks")), showsOf(vip.list));
+  if (tags.length) {
+    sections.push({
+      title: t("Categories"),
+      links: tags.map((g) => ({ title: String(g.tag_name), imageUrl: img(g.pic_img || g.icon) || undefined, page: `books:${g.tag_id}` })),
+    });
+  }
+  return { title: t("Audiobooks"), sections };
+}
+
+async function audiobookTags() {
+  const d = await kg("/v3/list_audiobook_tags", { params: { platform: "android", clientver: 20789 }, router: "longaudio.kugou.com" });
+  return list(d, d.list, d.info).filter((g) => g.tag_id);
+}
+
+// One category of books: its most played first, and its sub-categories.
+async function audiobookTagPage(tagId) {
+  const tags = await audiobookTags().catch(() => []);
+  const top = tags.find((g) => String(g.tag_id) === String(tagId));
+  const parent = tags.find((g) => list(g.son).some((x) => String(x.tag_id) === String(tagId)));
+  const me = top || list(parent?.son).find((x) => String(x.tag_id) === String(tagId));
+  const d = await kg("/longaudio/v1/album/list", {
+    params: { api_ver: 2, gender: 0, sort: 0, tag_id: Number(tagId), free: 1, status: 0, page: 1, page_size: 60, clientver: 20789 },
+  });
+  const sections = [{ shows: showsOf(d.data_list || d.list), empty: t("Nothing here yet") }];
+  if (top && list(top.son).length) {
+    sections.push({ title: t("More in this category"), links: list(top.son).map((x) => ({ title: String(x.tag_name), page: `books:${x.tag_id}` })) });
+  }
+  return { title: me ? String(me.tag_name) : t("Audiobooks"), sections };
 }
 
 // ---------- the listener's library ----------
