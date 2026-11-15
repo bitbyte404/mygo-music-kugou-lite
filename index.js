@@ -156,14 +156,17 @@ const list = (...xs) => {
   return [];
 };
 // Kugou's image servers make a picture any size asked, by a number in its
-// path (/stdmusic/240/, /custom/150/, /softhead/100/, ...) or {size} there.
-// The app fills in {size} with the pixels it shows the picture at (0.1.20
-// and on), so every such path gets {size}; anything else stays as it came.
+// path (/stdmusic/240/, /custom/150/, /softhead/100/, ...). Only the common
+// sizes sit in their CDN's cache, though: an odd size (the exact pixels the
+// app shows a cover at) is drawn on first ask, 0.5 to 20 s against about
+// 0.1 s. So every such path asks for 400, cached everywhere and sharp enough
+// for the biggest place the app shows one; anything else stays as it came.
 const SIZED = /^(https?:\/\/(?:[\w-]+\.)*(?:kugou\.com|kgimg\.com)\/(?:stdmusic|mcommon|kugouicon|custom|uploadpic\/softhead)\/)(?:\d+|\{size\})\//;
+const COVER_SIZE = 400;
 const img = (u) => {
   if (!u) return undefined;
   const s = String(u).replace(/^http:/, "https:");
-  return SIZED.test(s) ? s.replace(SIZED, "$1{size}/") : s;
+  return SIZED.test(s) ? s.replace(SIZED, `$1${COVER_SIZE}/`) : s;
 };
 
 // ---------- AES-128-CBC and RSA, for registering the device ----------
