@@ -106,5 +106,7 @@
   "Concept Edition (default) gets the daily free VIP. Kugou Music uses the VIP bought in the regular Kugou app.": "酷狗概念版（默认）可以每天领免费 VIP；酷狗音乐用你在酷狗音乐 App 里开通的 VIP。两种方式分别登录。",
   "Claims the Concept Edition's free VIP once a day while signed in.": "登录后每天自动领一次酷狗概念版免费 VIP（仅概念版）。",
   "On (default)": "开（默认）",
-  "Off": "关"
+  "Off": "关",
+  "Kugou returned an invalid MV list": "酷狗返回的 MV 列表格式有误",
+  "Kugou couldn't play this MV": "酷狗暂时无法播放这个 MV"
 }

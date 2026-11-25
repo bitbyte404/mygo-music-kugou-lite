@@ -1848,6 +1848,67 @@ export async function stream({ id, quality }) {
   throw fail("unavailable", signedIn() ? t("Kugou won't play this one: VIP or copyright") : t("Sign in to play this"));
 }
 
+// ---------- music videos ----------
+
+const MV_HASH = /^[0-9a-f]{32}$/i;
+
+// Return one official H.264 MV per song. Kugou groups the results by song
+// and also includes user uploads and videos associated with other versions.
+export async function trackMVs({ ids }) {
+  const tracks = new Map();
+  for (const id of ids) {
+    const { hash, mix } = parseId(id);
+    if (!MV_HASH.test(hash) || !Number.isSafeInteger(mix) || mix < 1 || id.endsWith(CLOUD_TAG)) continue;
+    if (!tracks.has(mix)) tracks.set(mix, []);
+    tracks.get(mix).push(id);
+  }
+
+  const matches = new Map();
+  const mixes = [...tracks.keys()];
+  for (let offset = 0; offset < mixes.length; offset += PAGE) {
+    const requested = new Set(mixes.slice(offset, offset + PAGE));
+    const data = [...requested].map((mix) => ({ album_audio_id: String(mix) }));
+    const groups = await kg("/kmr/v1/audio/mv", {
+      body: { data, fields: "h264" },
+      router: "openapi.kugou.com",
+      headers: { "KG-TID": "38" },
+    });
+    if (!Array.isArray(groups)) throw new Error(t("Kugou returned an invalid MV list"));
+    for (const group of groups) {
+      if (!Array.isArray(group)) continue;
+      for (const v of group) {
+        const mix = Number(v?.album_audio_id);
+        if (!requested.has(mix) || matches.has(mix) || Number(v.is_publish) !== 1 ||
+            Number(v.is_ugc) || Number(v.is_other) || Number(v.is_short)) continue;
+        const formats = v.h264 || {};
+        const hash = [formats.hd_hash, formats.qhd_hash, formats.sd_hash, formats.ld_hash, formats.fhd_hash]
+          .find((candidate) => typeof candidate === "string" && MV_HASH.test(candidate));
+        if (hash) matches.set(mix, hash.toLowerCase());
+      }
+    }
+  }
+  const result = {};
+  for (const [mix, mv] of matches) {
+    for (const id of tracks.get(mix)) result[id] = mv;
+  }
+  return result;
+}
+
+export async function mvStream({ id }) {
+  const hash = String(id).toLowerCase();
+  if (!MV_HASH.test(hash)) throw fail("unavailable", t("Kugou couldn't play this MV"));
+  const key = md5(`${hash}${KEY_SALTP()}${APP()}${mid()}${auth().userid || 0}`);
+  const data = await kg("/v2/interface/index", {
+    params: { backupdomain: 1, cmd: 123, ext: "mp4", ismp3: 0, hash, pid: 1, type: 1, key },
+    router: "trackermv.kugou.com",
+  });
+  const v = data?.[hash];
+  const url = [v?.downurl, ...list(v?.backupdownurl)]
+    .find((candidate) => typeof candidate === "string" && /^https?:\/\//i.test(candidate));
+  if (!url) throw fail("unavailable", t("Kugou couldn't play this MV"));
+  return { url, type: "mp4" };
+}
+
 
 // ---------- lyrics ----------
 
