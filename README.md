@@ -37,6 +37,13 @@
 - 能不能播、能播什么音质取决于你的账号：未登录只能播免费歌曲，VIP 歌曲需要登录并领取 VIP（概念版）或开通酷狗音乐 VIP（酷狗音乐）。用酷狗音乐方式且没有 VIP 时，需要会员的歌会显示为灰色。
 - 「默认收藏」和「我喜欢」是酷狗自带的列表，不能删除。
 
+## MV 接口
+
+支持 MV 的宿主可以调用以下可选方法。
+
+- `trackMVs({ ids })` 批量查询插件返回的歌曲 ID，返回从歌曲 ID 到 MV ID 的映射。只返回与该歌曲版本关联的已发布正式 MV，且需要有 H.264 资源。
+- `mvStream({ id })` 接收上述 MV ID，返回 `{ url, type: "mp4" }`。播放地址可能过期，建议在用户开始播放 MV 时获取。
+
 ## 致谢
 
 接口与签名参考 [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)（MIT）；KRC 解压用 [tiny-inflate](https://github.com/foliojs/tiny-inflate)（MIT）。
